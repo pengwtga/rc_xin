@@ -1,0 +1,53 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: rc-notify
+  datasource:
+    # 默认指向 docker-compose.yml 起的 MySQL 8.0.46（localhost:33061）
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:33061}/${MYSQL_DB:notify}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${MYSQL_USER:notify}
+    password: ${MYSQL_PASSWORD:notify123}
+    hikari:
+      # worker 不各持连接：只在认领/落库两个瞬间借还（参数定值依据 §3.5）
+      maximum-pool-size: 30
+      minimum-idle: 5
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+# 全部运行参数收口于此（T0.3）。每个值的推导见《API通知系统_参数定值依据.md》
+notify:
+  dispatcher:
+    # 测试环境置 false，改为手动调用 pollOnce()（设计文档 §9.2 用例 7）
+    scheduler-enabled: ${NOTIFY_SCHEDULER_ENABLED:true}
+    poll-interval-ms: 500        # 体验型：SLA p99<5s 中分给队列等待的 ~10%
+    batch-size-max: 100          # 耦合型：<= worker-pool-size，且 >= 每周期补给需求(~86)
+    worker-pool-size: 200        # 容量型：覆盖"下游整体慢 5 倍"故障态，极端态交给熔断
+    lease-ttl-ms: 60000          # 耦合型：> total-timeout(15s)+余量，双投率由比值决定
+  http:
+    connect-timeout-ms: 3000     # 防御型：TCP 握手正常值的 30 倍
+    total-timeout-ms: 15000      # 防御型：对端 P99 的 ~15 倍
+  backoff:
+    base-ms: 10000               # delay(n) = min(cap, base*2^(n-1)) * rand(1-j, 1+j)
+    cap-ms: 3600000              # 尾部保持小时级节奏，控制权交还人工重放
+    jitter: 0.5                  # 全抖动防惊群（供应商恢复瞬间所有任务同秒涌出）
+  retry:
+    max-attempts: 10             # 业务型：退避曲线累计 ~3.5h ≈ 补偿窗口
+  backpressure:
+    max-pending: 100000          # ~10 分钟消化时间（172 QPS 消费速率）
+    max-oldest-age-minutes: 30   # p99 SLA(5s) 的 360 倍，明确异常信号
+
+logging:
+  level:
+    org.flywaydb: INFO
