@@ -4,6 +4,9 @@ server:
 spring:
   application:
     name: rc-notify
+  jackson:
+    # 对外契约统一 snake_case（idempotency_key / notification_no ...）
+    property-naming-strategy: SNAKE_CASE
   datasource:
     # 默认指向 docker-compose.yml 起的 MySQL 8.0.46（localhost:33061）
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:33061}/${MYSQL_DB:notify}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
@@ -28,6 +31,17 @@ management:
 
 # 全部运行参数收口于此（T0.3）。每个值的推导见《API通知系统_参数定值依据.md》
 notify:
+  # 静态 API Key 表（T1.1）：api-key -> caller-id 一对一，caller 由凭证派生而非请求体字段。
+  # MVP 放在配置里；生产应由配置中心/密钥管理注入，不在仓库留真实密钥。
+  auth:
+    clients:
+      - api-key: k_shop
+        caller-id: shop
+      - api-key: k_crm
+        caller-id: crm
+      - api-key: k_inventory
+        caller-id: inventory
+        max-attempts: 6          # 可按接入方覆盖重试预算（默认取 notify.retry.max-attempts）
   dispatcher:
     # 测试环境置 false，改为手动调用 pollOnce()（设计文档 §9.2 用例 7）
     scheduler-enabled: ${NOTIFY_SCHEDULER_ENABLED:true}
