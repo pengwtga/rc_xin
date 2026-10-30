@@ -1,0 +1,157 @@
+package com.rc.notify.store;
+
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.sql.Timestamp;
+import java.sql.Types;
+import java.util.List;
+
+/**
+ * 投递引擎的存储侧（T1.2）：认领 / 回读 / 状态落库 / 逐次明细。
+ *
+ * <p>SQL 与设计文档 V2 §4.3 一一对应，两个刻意的边界：
+ * <ul>
+ *   <li>{@link #claim} 是短事务（UPDATE + 回读），HTTP 调用绝不进来——行锁随事务提交释放，
+ *       否则一条 15s 慢请求挂住整批行锁和连接（T1.2 文档 §2.1）；</li>
+ *   <li>状态落库带 {@code lease_owner} 守卫，attempt 明细不带——明细是事实记录，
+ *       无论守卫成败都要留痕（T1.2 文档 §2.5）。</li>
+ * </ul>
+ *
+ * <p>{@code leaseOwner} 传入的是"实例ID/轮次token"（见 Dispatcher），认领后回读与守卫都以它定位本轮行。
+ */
+@Repository
+public class ClaimRepository {
+
+    private final JdbcTemplate jdbc;
+
+    public ClaimRepository(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    /** 认领：状态置 PROCESSING、写租约、attempt_count 在认领时自增（§4.2：worker 崩溃后没人执行"完成后自增"）。 */
+    private static final String CLAIM_UPDATE = """
+            UPDATE notification
+            SET status        = 'PROCESSING',
+                lease_owner   = ?,
+                lease_until   = DATE_ADD(NOW(3), INTERVAL ? SECOND),
+                attempt_count = attempt_count + 1
+            WHERE id IN (
+              SELECT id FROM (
+                SELECT id FROM notification
+                WHERE (status IN ('PENDING','RETRY_WAIT') AND next_attempt_at <= NOW(3))
+                   OR (status = 'PROCESSING' AND lease_until < NOW(3))
+                ORDER BY next_attempt_at
+                LIMIT ?
+                FOR UPDATE SKIP LOCKED
+              ) t
+            )
+            """;
+
+    /** 回读：轮次 token 保证只命中本轮认领的行，不会捞到上一轮仍在途的任务（T1.2 文档 §2.2）。 */
+    private static final String CLAIM_SELECT = """
+            SELECT id, caller_id, target_url, http_method, headers_enc, body_enc, attempt_count, max_attempts
+            FROM notification
+            WHERE lease_owner = ? AND status = 'PROCESSING'
+            """;
+
+    private static final String MARK_SUCCEEDED = """
+            UPDATE notification
+            SET status = 'SUCCEEDED', last_status_code = ?, last_error_class = NULL,
+                lease_owner = NULL, lease_until = NULL
+            WHERE id = ? AND lease_owner = ? AND status = 'PROCESSING'
+            """;
+
+    private static final String MARK_FAILED = """
+            UPDATE notification
+            SET status = ?, next_attempt_at = DATE_ADD(NOW(3), INTERVAL ? SECOND),
+                last_status_code = ?, last_error_class = ?,
+                lease_owner = NULL, lease_until = NULL
+            WHERE id = ? AND lease_owner = ? AND status = 'PROCESSING'
+            """;
+
+    private static final String INSERT_ATTEMPT = """
+            INSERT INTO delivery_attempt
+                (notification_id, attempt_no, started_at, duration_ms, status_code, error_class, response_snippet)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """;
+
+    /**
+     * 认领一批到期（或租约过期）任务。短事务：UPDATE + 回读，行锁随提交释放。
+     *
+     * @param leaseOwner 实例ID/轮次token，同时是后续状态落库的守卫键
+     * @param batch      认领条数（调用方已按空闲 worker 钳制）
+     * @param leaseTtlS  租约秒数（DB NOW(3) 起算，不用应用时钟——§4.3 约束 3）
+     */
+    @Transactional
+    public List<Claimed> claim(String leaseOwner, int batch, int leaseTtlS) {
+        jdbc.update(CLAIM_UPDATE, leaseOwner, leaseTtlS, batch);
+        return jdbc.query(CLAIM_SELECT, (rs, i) -> new Claimed(
+                        rs.getLong("id"),
+                        rs.getString("caller_id"),
+                        rs.getString("target_url"),
+                        rs.getString("http_method"),
+                        rs.getBytes("headers_enc"),
+                        rs.getBytes("body_enc"),
+                        rs.getInt("attempt_count"),
+                        rs.getInt("max_attempts")),
+                leaseOwner);
+    }
+
+    /** 成功落库。返回 false = 守卫失败（结果已过期），调用方丢弃并记日志。 */
+    public boolean markSucceeded(long id, String leaseOwner, Integer statusCode) {
+        return jdbc.update(MARK_SUCCEEDED, statusCode, id, leaseOwner) == 1;
+    }
+
+    /**
+     * 失败落库。
+     *
+     * @param nextStatus RETRY_WAIT（还有预算）或 DEAD（预算耗尽），由调用方判定
+     * @param delayS     退避秒数（T1.2 为最小指数退避，T2.1 换 ErrorClassifier + 全抖动）
+     */
+    public boolean markFailed(long id, String leaseOwner, String nextStatus, long delayS,
+                              Integer statusCode, String errorClass) {
+        return jdbc.update(MARK_FAILED, nextStatus, delayS, statusCode, errorClass, id, leaseOwner) == 1;
+    }
+
+    /** 逐次明细：只追加、无条件插入（无论守卫成败，这次 HTTP 真实发生过）。 */
+    public void insertAttempt(long notificationId, int attemptNo, Timestamp startedAt, long durationMs,
+                              Integer statusCode, String errorClass, String responseSnippet) {
+        jdbc.update(con -> {
+            var ps = con.prepareStatement(INSERT_ATTEMPT);
+            ps.setLong(1, notificationId);
+            ps.setInt(2, attemptNo);
+            ps.setTimestamp(3, startedAt);
+            ps.setLong(4, durationMs);
+            if (statusCode == null) {
+                ps.setNull(5, Types.SMALLINT);
+            } else {
+                ps.setInt(5, statusCode);
+            }
+            if (errorClass == null) {
+                ps.setNull(6, Types.VARCHAR);
+            } else {
+                ps.setString(6, errorClass);
+            }
+            if (responseSnippet == null) {
+                ps.setNull(7, Types.VARCHAR);
+            } else {
+                ps.setString(7, responseSnippet);
+            }
+            return ps;
+        });
+    }
+
+    /** 认领后的任务视图（attemptNo = 自增后的 attempt_count，delivery_attempt 的 attempt_no 与之一致）。 */
+    public record Claimed(
+            long id,
+            String callerId,
+            String targetUrl,
+            String httpMethod,
+            byte[] headersEnc,
+            byte[] bodyEnc,
+            int attemptNo,
+            int maxAttempts
+    ) {}
+}

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
@@ -38,5 +39,23 @@ public class PlaintextPayloadCodec implements PayloadCodec {
     @Override
     public byte[] encodeBody(String body) {
         return body == null ? null : body.getBytes(StandardCharsets.UTF_8);
+    }
+
+    @Override
+    public Map<String, String> decodeHeaders(byte[] stored) {
+        if (stored == null) {
+            return Map.of();
+        }
+        try {
+            return objectMapper.readValue(stored,
+                    objectMapper.getTypeFactory().constructMapType(Map.class, String.class, String.class));
+        } catch (IOException e) {
+            throw new IllegalStateException("Header 反序列化失败", e);
+        }
+    }
+
+    @Override
+    public String decodeBody(byte[] stored) {
+        return stored == null ? null : new String(stored, StandardCharsets.UTF_8);
     }
 }

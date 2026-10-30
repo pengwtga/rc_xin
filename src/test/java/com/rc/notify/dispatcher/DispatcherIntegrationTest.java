@@ -1,0 +1,244 @@
+package com.rc.notify.dispatcher;
+
+import com.rc.notify.store.ClaimRepository;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.sql.Timestamp;
+import java.util.Map;
+import java.util.function.BooleanSupplier;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * T1.2 集成验收（真实 MySQL + 本地 HttpServer）。
+ *
+ * <p>默认跳过（无 DB 环境 mvn test 保持绿）；本地验证：
+ * <pre>docker compose up -d &amp;&amp; MYSQL_IT=true mvn test</pre>
+ * 调度器已置 false：投递全部由测试手动调用 pollOnce() 驱动（§9.2 用例 7）。
+ */
+@SpringBootTest(properties = {
+        "notify.dispatcher.scheduler-enabled=false",
+        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+})
+@EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
+class DispatcherIntegrationTest {
+
+    @Autowired
+    private Dispatcher dispatcher;
+    @Autowired
+    private ClaimRepository claims;
+    @Autowired
+    private JdbcTemplate jdbc;
+
+    private com.sun.net.httpserver.HttpServer mock;
+    private int mockPort;
+    private final java.util.List<String> mockHits = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    @BeforeEach
+    void setUp() throws Exception {
+        jdbc.update("DELETE FROM delivery_attempt");
+        jdbc.update("DELETE FROM notification");
+
+        mock = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        mock.createContext("/", exchange -> {
+            byte[] body = exchange.getRequestBody().readAllBytes();
+            mockHits.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath()
+                    + " auth=" + exchange.getRequestHeaders().getFirst("Authorization")
+                    + " body=" + new String(body));
+            byte[] resp = "{\"received\":true}".getBytes();
+            exchange.sendResponseHeaders(200, resp.length);
+            exchange.getResponseBody().write(resp);
+            exchange.close();
+        });
+        mock.start();
+        mockPort = mock.getAddress().getPort();
+    }
+
+    private void tearDownMock() {
+        mock.stop(0);
+    }
+
+    private void insertPending(String key, String url, String method, int maxAttempts) {
+        jdbc.update("""
+                INSERT INTO notification
+                    (caller_id, idempotency_key, target_url, http_method, headers_enc, body_enc,
+                     status, attempt_count, max_attempts, next_attempt_at)
+                VALUES ('shop', ?, ?, ?, ?, ?, 'PENDING', 0, ?, NOW(3))
+                """, key, url, method,
+                "{\"Authorization\":\"Bearer tok\"}".getBytes(), "{\"x\":1}".getBytes(), maxAttempts);
+    }
+
+    private long soleId() {
+        return jdbc.queryForObject("SELECT id FROM notification ORDER BY id DESC LIMIT 1", Long.class);
+    }
+
+    private static void await(BooleanSupplier cond, String what) {
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (System.currentTimeMillis() < deadline) {
+            if (cond.getAsBoolean()) {
+                return;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        }
+        throw new AssertionError("等待超时: " + what);
+    }
+
+    @Test
+    void 端到端_提交认领投递成功() throws Exception {
+        insertPending("e2e_ok", "http://127.0.0.1:" + mockPort + "/cb", "POST", 10);
+        long id = soleId();
+
+        int n = dispatcher.pollOnce();
+        assertThat(n).isEqualTo(1);
+
+        await(() -> "SUCCEEDED".equals(jdbc.queryForObject(
+                "SELECT status FROM notification WHERE id=" + id, String.class)), "SUCCEEDED");
+
+        Map<String, Object> row = jdbc.queryForMap(
+                "SELECT status, attempt_count, lease_owner, lease_until, last_status_code FROM notification WHERE id=" + id);
+        assertThat(row.get("attempt_count")).isEqualTo(1);
+        assertThat(row.get("last_status_code")).isEqualTo(200);
+        assertThat(row.get("lease_owner")).isNull();      // 投递完成租约清空
+        assertThat(row.get("lease_until")).isNull();
+
+        Map<String, Object> att = jdbc.queryForMap(
+                "SELECT attempt_no, status_code, error_class, duration_ms, response_snippet FROM delivery_attempt WHERE notification_id=" + id);
+        assertThat(att.get("attempt_no")).isEqualTo(1);
+        assertThat(att.get("status_code")).isEqualTo(200);
+        assertThat(att.get("error_class")).isNull();
+        assertThat((String) att.get("response_snippet")).contains("received");
+
+        assertThat(mockHits).hasSize(1);
+        assertThat(mockHits.get(0)).contains("POST /cb", "auth=Bearer tok", "body={\"x\":1}");
+        tearDownMock();
+    }
+
+    @Test
+    void 下游五百进入RETRY_WAIT且退避在未来() throws Exception {
+        mock.createContext("/5xx", exchange -> {
+            mockHits.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath());
+            exchange.sendResponseHeaders(500, -1);
+            exchange.close();
+        });
+        insertPending("e2e_5xx", "http://127.0.0.1:" + mockPort + "/5xx", "POST", 10);
+        long id = soleId();
+
+        dispatcher.pollOnce();
+        await(() -> "RETRY_WAIT".equals(jdbc.queryForObject(
+                "SELECT status FROM notification WHERE id=" + id, String.class)), "RETRY_WAIT");
+
+        Map<String, Object> row = jdbc.queryForMap(
+                "SELECT attempt_count, last_status_code, "
+                        + "next_attempt_at > NOW(3) AS in_future FROM notification WHERE id=" + id);
+        assertThat(row.get("attempt_count")).isEqualTo(1);
+        assertThat(row.get("last_status_code")).isEqualTo(500);
+        assertThat(((Number) row.get("in_future")).intValue()).isEqualTo(1); // 最小指数退避：base=10s
+
+        // 第二轮轮询：退避未到，不应被再次认领
+        int second = dispatcher.pollOnce();
+        assertThat(second).isZero();
+        assertThat(mockHits).hasSize(1);
+        tearDownMock();
+    }
+
+    @Test
+    void 预算耗尽转DEAD且不再被认领() throws Exception {
+        mock.createContext("/5xx", exchange -> {
+            mockHits.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath());
+            exchange.sendResponseHeaders(500, -1);
+            exchange.close();
+        });
+        insertPending("e2e_dead", "http://127.0.0.1:" + mockPort + "/5xx", "POST", 1);
+        long id = soleId();
+
+        dispatcher.pollOnce();
+        await(() -> "DEAD".equals(jdbc.queryForObject(
+                "SELECT status FROM notification WHERE id=" + id, String.class)), "DEAD");
+
+        assertThat(jdbc.queryForObject(
+                "SELECT attempt_count FROM notification WHERE id=" + id, Integer.class)).isEqualTo(1);
+
+        // DEAD 不在认领条件内：再轮询也不动它
+        dispatcher.pollOnce();
+        Thread.sleep(200);
+        assertThat(mockHits).hasSize(1);
+        assertThat(jdbc.queryForList(
+                "SELECT attempt_no FROM delivery_attempt WHERE notification_id=" + id, Integer.class))
+                .containsExactly(1);
+        tearDownMock();
+    }
+
+    @Test
+    void 租约过期的PROCESSING行可被重领_崩溃回收即认领条件() {
+        // 模拟旧实例崩溃残留：PROCESSING + 租约已过期
+        jdbc.update("""
+                INSERT INTO notification
+                    (caller_id, idempotency_key, target_url, http_method, headers_enc, body_enc,
+                     status, attempt_count, max_attempts, next_attempt_at, lease_owner, lease_until)
+                VALUES ('shop', 'e2e_zombie', 'http://stub', 'POST', NULL, NULL,
+                        'PROCESSING', 1, 10, NOW(3) - INTERVAL 1 MINUTE, 'dead-instance', NOW(3) - INTERVAL 1 SECOND)
+                """);
+        long id = soleId();
+
+        int n = dispatcher.pollOnce();
+        assertThat(n).isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                "SELECT attempt_count FROM notification WHERE id=" + id, Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject(
+                "SELECT status FROM notification WHERE id=" + id, String.class)).isEqualTo("PROCESSING");
+    }
+
+    @Test
+    void 守卫失败不覆盖状态_结果过期被丢弃() {
+        insertPending("e2e_guard", "http://stub", "POST", 10);
+        long id = soleId();
+
+        var claimed = claims.claim("token-A", 1, 60);
+        assertThat(claimed).hasSize(1);
+
+        // 旧 token 的过期结果：必须被守卫拒绝
+        assertThat(claims.markSucceeded(id, "token-STALE", 200)).isFalse();
+        assertThat(jdbc.queryForObject("SELECT status FROM notification WHERE id=" + id, String.class))
+                .isEqualTo("PROCESSING");
+
+        // 正确 token：成功落库
+        assertThat(claims.markSucceeded(id, "token-A", 200)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM notification WHERE id=" + id, String.class))
+                .isEqualTo("SUCCEEDED");
+
+        // 终态行不可再被认领
+        assertThat(claims.claim("token-B", 10, 60)).isEmpty();
+    }
+
+    @Test
+    void 明细只追加_守卫失败的attempt也留痕() throws Exception {
+        // 复现"投递完成但租约已转移"：明细落了、状态没落 —— 下游可能收到两次的直接证据
+        insertPending("e2e_fact", "http://stub", "POST", 10);
+        long id = soleId();
+
+        claims.claim("token-A", 1, 60);
+        // 抢先模拟租约被他人接管
+        jdbc.update("UPDATE notification SET lease_owner='token-B' WHERE id=" + id);
+
+        claims.insertAttempt(id, 1, new Timestamp(System.currentTimeMillis()), 12, 200, null, "ok");
+        boolean applied = claims.markSucceeded(id, "token-A", 200);
+        assertThat(applied).isFalse();
+
+        // 明细留痕（事实发生过），状态与租约未被覆盖
+        assertThat(jdbc.queryForList(
+                "SELECT status_code FROM delivery_attempt WHERE notification_id=" + id, Integer.class))
+                .containsExactly(200);
+        assertThat(jdbc.queryForObject("SELECT lease_owner FROM notification WHERE id=" + id, String.class))
+                .isEqualTo("token-B");
+    }
+}
