@@ -23,10 +23,23 @@ curl -s http://localhost:8080/actuator/health   # -> {"status":"UP"}
 ## 里程碑进度
 
 - [x] **M0** 骨架可启动、可迁移、可测试（T0.1 结构 / T0.2 建表 / T0.3 启动自检）
-- [ ] M1 能存能投（接入接口 + 投递引擎 + 幂等）
-- [ ] M2 可靠投递（失败分级 / 租约恢复 / 死信 / SSRF / 熔断隔离）
+- [x] **M1** 能存能投（T1.1 接入接口 / T1.2 投递引擎 / T1.3 幂等去重）
+- [ ] M2 可靠投递（T2.1 失败分级 ✔ / T2.2 租约恢复 ✔ / T2.3 死信 / T2.4 SSRF+加密 / T2.5 熔断隔离）
 - [ ] M3 可观测与运维（查询 / 重放 / 指标 / 背压 / 归档）
 - [ ] M4 交付（压测 / README / AI 会话记录）
+
+## 故障演示
+
+```bash
+# 投递中途 kill -9 一个实例，另一个实例在租约到期后接手（约 70s，含 60s 租约等待）
+bash scripts/crash_recovery_demo.sh
+
+# 慢/坏下游，供手工验收
+python3 scripts/mock_downstream.py --port 9001 --sleep 20   # 触发 15s 超时
+python3 scripts/mock_downstream.py --port 9001 --status 500 # 触发可重试失败
+```
+
+原理与取舍见 `docs/T2.2-租约与崩溃恢复.md`。
 
 ## 配置
 
