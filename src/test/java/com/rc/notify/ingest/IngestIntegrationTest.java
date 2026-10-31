@@ -70,20 +70,74 @@ class IngestIntegrationTest {
     }
 
     @Test
-    void 同幂等键重复提交返回409_本阶段语义_T13改为202原单号() throws Exception {
+    void 同幂等键重复提交返回202与原单号_表中仅一行() throws Exception {
+        String first = mockMvc.perform(post("/v1/notifications")
+                        .header(ApiKeyAuthFilter.HEADER_API_KEY, "k_shop")
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString();
+
+        String second = mockMvc.perform(post("/v1/notifications")
+                        .header(ApiKeyAuthFilter.HEADER_API_KEY, "k_shop")
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                .andExpect(status().isAccepted())                      // 不是 409：重试是正常路径
+                .andReturn().getResponse().getContentAsString();
+
+        // 两次响应单号相同（JsonPath.value(Object) 会被编译器解析成 value(Matcher)，故显式取数比较）
+        assertThat(noOf(second)).isEqualTo(noOf(first));
+
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM notification", Integer.class);
+        assertThat(count).isEqualTo(1);
+    }
+
+    @Test
+    void 十并发同键提交_全部拿到同一单号且仅落一行() throws Exception {
+        int threads = 10;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        var startGate = new java.util.concurrent.CountDownLatch(1);
+        var results = new java.util.concurrent.ConcurrentLinkedQueue<Long>();
+        var failures = new java.util.concurrent.ConcurrentLinkedQueue<Throwable>();
+
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    startGate.await();
+                    var resp = mockMvc.perform(post("/v1/notifications")
+                                    .header(ApiKeyAuthFilter.HEADER_API_KEY, "k_shop")
+                                    .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                            .andExpect(status().isAccepted())
+                            .andReturn().getResponse().getContentAsString();
+                    results.add(noOf(resp));
+                } catch (Throwable t) {
+                    failures.add(t);
+                }
+            });
+        }
+        startGate.countDown();
+        pool.shutdown();
+        assertThat(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+        assertThat(failures).isEmpty();
+        assertThat(results).hasSize(threads);
+        assertThat(results.stream().distinct().count()).isEqualTo(1);   // 10 个响应同单号
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM notification", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void 重复提交已成功的单_返回原单当前状态而非PENDING() throws Exception {
         mockMvc.perform(post("/v1/notifications")
                         .header(ApiKeyAuthFilter.HEADER_API_KEY, "k_shop")
                         .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
                 .andExpect(status().isAccepted());
 
+        // 模拟原单已完成（T1.2 投递成功后的状态）
+        jdbc.update("UPDATE notification SET status='SUCCEEDED' WHERE idempotency_key='order_paid:pay_it_001'");
+
         mockMvc.perform(post("/v1/notifications")
                         .header(ApiKeyAuthFilter.HEADER_API_KEY, "k_shop")
                         .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.code").value("DUPLICATE_IDEMPOTENCY_KEY"));
-
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM notification", Integer.class);
-        assertThat(count).isEqualTo(1);
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("SUCCEEDED"));   // 快照：真实状态，不撒谎
     }
 
     @Test
@@ -99,5 +153,9 @@ class IngestIntegrationTest {
 
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM notification", Integer.class);
         assertThat(count).isEqualTo(2);
+    }
+
+    private static long noOf(String json) {
+        return ((Number) com.jayway.jsonpath.JsonPath.read(json, "$.notification_no")).longValue();
     }
 }

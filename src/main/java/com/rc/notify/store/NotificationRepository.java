@@ -6,6 +6,7 @@ import org.springframework.stereotype.Repository;
 
 import java.sql.PreparedStatement;
 import java.sql.Types;
+import java.util.Optional;
 
 /**
  * notification 表的写入侧（T1.1）。
@@ -76,4 +77,23 @@ public class NotificationRepository {
             byte[] body,
             int maxAttempts
     ) {}
+
+    /**
+     * 幂等命中后回查原单（T1.3）。
+     *
+     * <p>走 {@code uk_idem (caller_id, idempotency_key)} 覆盖索引点查。
+     * 调用时机是"INSERT 已抛 DuplicateKeyException"之后——此刻原单必然已提交
+     * （InnoDB 唯一索引插入会等待未提交的冲突键），所以正常情况不会返回空
+     * （T1.3 文档 §2.6）。
+     */
+    public Optional<Existing> findExisting(String callerId, String idempotencyKey) {
+        return jdbc.query(
+                        "SELECT id, status FROM notification WHERE caller_id = ? AND idempotency_key = ?",
+                        (rs, i) -> new Existing(rs.getLong("id"), rs.getString("status")),
+                        callerId, idempotencyKey)
+                .stream().findFirst();
+    }
+
+    /** 已存在的原单：单号 + 当前状态（快照，不承诺后续不变）。 */
+    public record Existing(long id, String status) {}
 }

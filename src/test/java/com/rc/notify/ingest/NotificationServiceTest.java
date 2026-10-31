@@ -127,4 +127,41 @@ class NotificationServiceTest {
         assertThat(captor.getValue().maxAttempts()).isEqualTo(6);
         assertThat(captor.getValue().httpMethod()).isEqualTo("PUT");
     }
+
+    @Test
+    void 幂等命中_返回原单号与原单当前状态() {
+        given(repository.insert(any())).willThrow(
+                new org.springframework.dao.DuplicateKeyException("uk_idem dup"));
+        given(repository.findExisting("shop", "order_paid:pay_001"))
+                .willReturn(java.util.Optional.of(new NotificationRepository.Existing(42L, "SUCCEEDED")));
+
+        var resp = service.submit(req("https://x.com/cb", null, null, "{}"), caller);
+
+        assertThat(resp.notificationNo()).isEqualTo(42L);
+        assertThat(resp.status()).isEqualTo("SUCCEEDED");   // 快照语义：原单真实状态，不是 PENDING
+    }
+
+    @Test
+    void 幂等键提交前trim_回查用同一规范化值() {
+        given(repository.insert(any())).willThrow(
+                new org.springframework.dao.DuplicateKeyException("uk_idem dup"));
+        given(repository.findExisting("shop", "order_paid:pay_001"))
+                .willReturn(java.util.Optional.of(new NotificationRepository.Existing(9L, "PENDING")));
+
+        var resp = service.submit(new SubmitNotificationRequest(
+                "  order_paid:pay_001  ", "https://x.com/cb", null, null, "{}"), caller);
+
+        assertThat(resp.notificationNo()).isEqualTo(9L);
+    }
+
+    @Test
+    void 冲突但回查不到原单_抛异常而不是编造单号() {
+        given(repository.insert(any())).willThrow(
+                new org.springframework.dao.DuplicateKeyException("uk_idem dup"));
+        given(repository.findExisting(any(), any())).willReturn(java.util.Optional.empty());
+
+        assertThatThrownBy(() -> service.submit(req("https://x.com/cb", null, null, "{}"), caller))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("回查不到原单");
+    }
 }

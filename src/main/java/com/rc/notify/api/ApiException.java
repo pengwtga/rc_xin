@@ -20,11 +20,6 @@ public class ApiException extends RuntimeException {
         return new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "VALIDATION_FAILED", message);
     }
 
-    public static ApiException duplicateIdempotencyKey() {
-        return new ApiException(HttpStatus.CONFLICT, "DUPLICATE_IDEMPOTENCY_KEY",
-                "同 caller 同 idempotency_key 的通知已存在（T1.3 将改为返回 202 + 原单号）");
-    }
-
     public HttpStatus status() {
         return status;
     }

@@ -61,15 +61,21 @@ public class NotificationService {
                 ? caller.maxAttempts()
                 : props.retry().maxAttempts();
 
+        String idempotencyKey = req.idempotencyKey().trim();
+
         try {
             long id = repository.insert(new NotificationRepository.NewNotification(
-                    caller.callerId(), req.idempotencyKey().trim(), targetUrl, method,
+                    caller.callerId(), idempotencyKey, targetUrl, method,
                     headers, body, maxAttempts));
             return new SubmitNotificationResponse(id, "PENDING");
         } catch (DuplicateKeyException e) {
-            // 唯一键 uk_idem 冲突：可预期的业务分支，不是系统故障。
-            // T1.3 将改为"返回 202 + 原单号"（幂等语义），本阶段显式返回 409（T1.1 文档 §2.5）。
-            throw ApiException.duplicateIdempotencyKey();
+            // 幂等命中（T1.3）：调用方超时重试是正常路径，不是错误路径——返回 202 + 原单，
+            // 让重试与首次提交在调用方看来完全一致（T1.3 文档 §2.2）。
+            // 唯一键冲突时原单必然已提交（InnoDB 插入会等待未提交的冲突键），回查不应读空。
+            return repository.findExisting(caller.callerId(), idempotencyKey)
+                    .map(existing -> new SubmitNotificationResponse(existing.id(), existing.status()))
+                    .orElseThrow(() -> new IllegalStateException(
+                            "唯一键冲突但回查不到原单，caller=%s, key=%s".formatted(caller.callerId(), idempotencyKey)));
         }
     }
 
