@@ -26,22 +26,47 @@ public record NotifyProperties(
 
     /** 投递引擎参数（设计文档 §4.3）。 */
     public record Dispatcher(
+            /** 是否启用后台轮询；集成测试置 false，改由测试手动调 pollOnce()。 */
             boolean schedulerEnabled,
+            /** 轮询间隔（ms）：500 —— 体验型，SLA p99&lt;5s 中队列等待只占 ~10%。 */
             long pollIntervalMs,
+            /** 单轮最大认领条数：100 —— 实际还受空闲 worker 数钳制，取两者较小值。 */
             int batchSizeMax,
+            /** 投递线程数：200 —— 一个投递占一个线程，"空闲 worker 数"由线程池维护。 */
             int workerPoolSize,
+            /** 租约时长（ms）：60000 —— 必须 &gt; totalTimeoutMs + 余量，否则双投率上升（启动断言）。 */
             long leaseTtlMs
     ) {}
 
     /** 出站 HTTP 超时预算（设计文档 §3.3：connect 3s / total 15s）。 */
-    public record Http(long connectTimeoutMs, long totalTimeoutMs) {}
+    public record Http(
+            /** TCP 握手超时（ms）：3000，正常握手的 30 倍。 */
+            long connectTimeoutMs,
+            /** 单次请求总超时（ms）：15000，含建连 + 等待 + 读响应；必须大于 connect 超时。 */
+            long totalTimeoutMs
+    ) {}
 
     /** 指数退避 + 全抖动（设计文档 §4.4）。delay(n) = min(cap, base * 2^(n-1)) * rand(1-j, 1+j) */
-    public record Backoff(long baseMs, long capMs, double jitter) {}
+    public record Backoff(
+            /** 退避基数（ms）：10000，第 n 次失败等待 base×2^(n-1)。 */
+            long baseMs,
+            /** 退避上限（ms）：3600000，抖动后最大 1.5×cap。 */
+            long capMs,
+            /** 抖动比例：0.5 表示 ±50%，全抖动用于打散供应商恢复瞬间的惊群。 */
+            double jitter
+    ) {}
 
     /** 重试预算（设计文档 §4.4：只花在 RETRYABLE 上，4xx 一次都不花）。 */
-    public record Retry(int maxAttempts) {}
+    public record Retry(
+            /** 全局重试上限：10，退避曲线累计 ≈3.5h ≈ 业务补偿窗口（调用方可覆盖）。 */
+            int maxAttempts
+    ) {}
 
     /** 背压阈值（设计文档 §4.8：拒绝优于堆积）。 */
-    public record Backpressure(int maxPending, int maxOldestAgeMinutes) {}
+    public record Backpressure(
+            /** 待投递积压上限（条）：100000，≈10 分钟消化量，超过即拒绝新请求。 */
+            int maxPending,
+            /** 最老待投递任务年龄上限（分钟）：30，超龄说明队列已经不健康，直接拒绝。 */
+            int maxOldestAgeMinutes
+    ) {}
 }

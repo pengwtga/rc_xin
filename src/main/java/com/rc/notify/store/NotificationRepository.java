@@ -69,12 +69,19 @@ public class NotificationRepository {
 
     /** 插入所需的最小字段集（不含服务端生成的 status/时间/租约）。 */
     public record NewNotification(
+            /** 调用方标识，由 API Key 派生。 */
             String callerId,
+            /** 事件级幂等键（已 trim），与 callerId 组成 uk_idem。 */
             String idempotencyKey,
+            /** 目标地址（已校验并 trim）。 */
             String targetUrl,
+            /** 大写 HTTP 方法（白名单内）。 */
             String httpMethod,
+            /** 已加密的 Header 字节，可为 null。 */
             byte[] headers,
+            /** 已加密的请求体字节，可为 null（无体请求）。 */
             byte[] body,
+            /** 该条通知的重试预算（调用方覆盖值或全局默认）。 */
             int maxAttempts
     ) {}
 
@@ -95,5 +102,10 @@ public class NotificationRepository {
     }
 
     /** 已存在的原单：单号 + 当前状态（快照，不承诺后续不变）。 */
-    public record Existing(long id, String status) {}
+    public record Existing(
+            /** 原单号，直接回给调用方。 */
+            long id,
+            /** 原单当前状态（PENDING/RETRY_WAIT/PROCESSING/SUCCEEDED/DEAD/CANCELED）。 */
+            String status
+    ) {}
 }

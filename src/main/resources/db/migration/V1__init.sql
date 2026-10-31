@@ -1,4 +1,5 @@
 -- V1__init.sql —— 设计文档 §4.1 数据模型（V2 版：无 replay_epoch，attempt_no 全局递增）
+-- 时间列一律 UTC，且只由 DB 时钟（NOW(3) / CURRENT_TIMESTAMP(3)）写入，避免多实例应用时钟漂移。
 
 CREATE TABLE notification (
   id               BIGINT UNSIGNED   NOT NULL AUTO_INCREMENT COMMENT '唯一单号，对外直接暴露（内部系统 + API Key 鉴权，无枚举风险）；不引入 ULID 等第二套标识',
@@ -12,29 +13,29 @@ CREATE TABLE notification (
   attempt_count    SMALLINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '累计尝试次数，认领时自增；达到 max_attempts 转 DEAD',
   max_attempts     SMALLINT UNSIGNED NOT NULL DEFAULT 10 COMMENT '重试预算，按调用方配置（默认 10）',
   next_attempt_at  DATETIME(3)       NOT NULL COMMENT '下次可投递时刻（UTC）；退避、熔断推迟都改这个字段',
-  lease_owner      VARCHAR(64)       NULL     COMMENT '当前持有租约的实例 ID（排查用）',
+  lease_owner      VARCHAR(64)       NULL     COMMENT '租约持有者标记 = 实例ID/轮次token（如 a1b2c3d4e5f6/7f3a9c21）；标记"哪一次认领"而非哪台机器——既用于回读本轮认领的行，也做状态落库的守卫键，防止过期结果覆盖新状态',
   lease_until      DATETIME(3)       NULL     COMMENT '租约到期时刻（UTC）；过期即可被重新认领',
-  last_error_class VARCHAR(32)       NULL     COMMENT 'TIMEOUT/DNS/TLS/CONN_REFUSED/HTTP_4XX/HTTP_5XX；告警路由依据',
+  last_error_class VARCHAR(32)       NULL     COMMENT '最近一次失败分类：TIMEOUT/DNS/TLS/CONN_REFUSED/IO（仅网络层）；有 HTTP 响应时为 NULL，4xx/5xx 由 status_code 判定；告警路由依据',
   last_status_code SMALLINT          NULL     COMMENT '最近一次 HTTP 状态码',
-  created_at       DATETIME(3)       NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  updated_at       DATETIME(3)       NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (id),
+  created_at       DATETIME(3)       NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时刻（UTC）；接入延迟统计的起点',
+  updated_at       DATETIME(3)       NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '最后一次状态变更时刻（UTC，DB 自动维护）；用于判断"这行多久没动过"',
+  PRIMARY KEY (id) COMMENT '自增主键，兼对外单号（notification_no）',
   UNIQUE KEY uk_idem (caller_id, idempotency_key) COMMENT '接入幂等：同调用方同业务键只允许一条',
-  KEY idx_due   (status, next_attempt_at) COMMENT '到期任务扫描',
-  KEY idx_lease (status, lease_until)      COMMENT '租约过期回收'
+  KEY idx_due   (status, next_attempt_at) COMMENT '到期任务扫描：认领 WHERE 条件与 ORDER BY 都走这条索引',
+  KEY idx_lease (status, lease_until)      COMMENT '租约过期回收：定位 PROCESSING 且租约已超时的行'
 ) ENGINE=InnoDB COMMENT='通知任务表 —— 本身即队列';
 
 CREATE TABLE delivery_attempt (
-  id               BIGINT UNSIGNED   NOT NULL AUTO_INCREMENT,
-  notification_id  BIGINT UNSIGNED   NOT NULL COMMENT '关联 notification.id',
+  id               BIGINT UNSIGNED   NOT NULL AUTO_INCREMENT COMMENT '自增主键，仅内部使用，不对外暴露（对外用 notification_id）',
+  notification_id  BIGINT UNSIGNED   NOT NULL COMMENT '关联 notification.id；不建外键：明细量大、只追加，约束成本高于收益，一致性由应用保证',
   attempt_no       SMALLINT UNSIGNED NOT NULL COMMENT '全局第几次尝试（跨重放继续递增，与 attempt_count 一致，因此重放不会撞唯一键）',
-  started_at       DATETIME(3)       NOT NULL,
-  duration_ms      INT               NULL,
-  status_code      SMALLINT          NULL COMMENT '网络层失败时为 NULL',
-  error_class      VARCHAR(32)       NULL,
-  response_snippet VARCHAR(2048)     NULL COMMENT '响应体前 2048 字符截断存储',
-  created_at       DATETIME(3)       NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (id),
-  UNIQUE KEY uk_n_attempt (notification_id, attempt_no),
-  KEY idx_n (notification_id)
+  started_at       DATETIME(3)       NOT NULL COMMENT '本次投递开始时刻（UTC）；与 duration_ms 一起还原单次投递时间线',
+  duration_ms      INT               NULL COMMENT '本次投递耗时（毫秒），含连接与响应读取；超时则约等于 total-timeout，用它判断"卡在哪一层"',
+  status_code      SMALLINT          NULL COMMENT 'HTTP 状态码；网络层失败时为 NULL',
+  error_class      VARCHAR(32)       NULL COMMENT '本次失败分类，取值同 notification.last_error_class；仅网络层失败有值，有 HTTP 响应时为 NULL，成功为 NULL',
+  response_snippet VARCHAR(2048)     NULL COMMENT '响应体前 2048 字符截断存储；只读这么多是为了不让失控对端拖住 worker',
+  created_at       DATETIME(3)       NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '明细写入时刻（UTC）；与 started_at 的差值即"投递结束到落库"的延迟',
+  PRIMARY KEY (id) COMMENT '自增主键；查询入口始终是 notification_id + attempt_no',
+  UNIQUE KEY uk_n_attempt (notification_id, attempt_no) COMMENT '同一条通知的尝试序号唯一：防止重复落库把明细写花',
+  KEY idx_n (notification_id) COMMENT '按单号查全部尝试（uk_n_attempt 的前缀已能覆盖，此索引为显式表达查询路径）'
 ) ENGINE=InnoDB COMMENT='逐次投递明细 —— 只追加，用于追责与排查';

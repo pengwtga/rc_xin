@@ -30,6 +30,7 @@ public class NotificationService {
 
     /** 与 headers_enc VARBINARY(4096) 对齐。 */
     private static final int MAX_HEADERS_BYTES = 4096;
+    /** Header 项数上限：50，正常回调只有 3~5 个，超出说明用错了系统。 */
     private static final int MAX_HEADER_COUNT = 50;
     /** 64KB 上限：业务方已渲染好的请求体，超过这个量级说明用错了系统。 */
     private static final int MAX_BODY_BYTES = 64 * 1024;

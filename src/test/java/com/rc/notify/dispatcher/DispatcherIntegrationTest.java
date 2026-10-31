@@ -241,4 +241,78 @@ class DispatcherIntegrationTest {
         assertThat(jdbc.queryForObject("SELECT lease_owner FROM notification WHERE id=" + id, String.class))
                 .isEqualTo("token-B");
     }
+
+    @Test
+    void 四百一次即DEAD不花重试预算() throws Exception {
+        mock.createContext("/400", exchange -> {
+            mockHits.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath());
+            exchange.sendResponseHeaders(400, -1);
+            exchange.close();
+        });
+        insertPending("e2e_400", "http://127.0.0.1:" + mockPort + "/400", "POST", 10);
+        long id = soleId();
+
+        dispatcher.pollOnce();
+        await(() -> "DEAD".equals(jdbc.queryForObject(
+                "SELECT status FROM notification WHERE id=" + id, String.class)), "DEAD");
+
+        // 一次即死：预算只花在可能自愈的失败上（§4.4）
+        assertThat(jdbc.queryForObject(
+                "SELECT attempt_count FROM notification WHERE id=" + id, Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                "SELECT last_status_code FROM notification WHERE id=" + id, Integer.class)).isEqualTo(400);
+        assertThat(jdbc.queryForObject(
+                "SELECT last_error_class FROM notification WHERE id=" + id, String.class)).isNull();
+
+        // 再轮询不动 DEAD 行
+        dispatcher.pollOnce();
+        Thread.sleep(200);
+        assertThat(mockHits).hasSize(1);
+        tearDownMock();
+    }
+
+    @Test
+    void 四百二十九带RetryAfter按承诺退避不抖动() throws Exception {
+        mock.createContext("/429r", exchange -> {
+            mockHits.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath());
+            exchange.getResponseHeaders().add("Retry-After", "120");
+            exchange.sendResponseHeaders(429, -1);
+            exchange.close();
+        });
+        insertPending("e2e_429r", "http://127.0.0.1:" + mockPort + "/429r", "POST", 10);
+        long id = soleId();
+
+        dispatcher.pollOnce();
+        await(() -> "RETRY_WAIT".equals(jdbc.queryForObject(
+                "SELECT status FROM notification WHERE id=" + id, String.class)), "RETRY_WAIT");
+
+        // 对方承诺 120s：恰好在承诺值附近（±2s 容忍落库耗时），不做全抖动
+        Integer diff = jdbc.queryForObject(
+                "SELECT TIMESTAMPDIFF(SECOND, NOW(3), next_attempt_at) FROM notification WHERE id=" + id,
+                Integer.class);
+        assertThat(diff).isBetween(118, 122);
+        tearDownMock();
+    }
+
+    @Test
+    void 四百二十九无RetryAfter走全抖动公式() throws Exception {
+        mock.createContext("/429", exchange -> {
+            mockHits.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath());
+            exchange.sendResponseHeaders(429, -1);
+            exchange.close();
+        });
+        insertPending("e2e_429", "http://127.0.0.1:" + mockPort + "/429", "POST", 10);
+        long id = soleId();
+
+        dispatcher.pollOnce();
+        await(() -> "RETRY_WAIT".equals(jdbc.queryForObject(
+                "SELECT status FROM notification WHERE id=" + id, String.class)), "RETRY_WAIT");
+
+        // base=10s、jitter=0.5 → [5s, 15s]，±1s 容忍落库耗时
+        Integer diff = jdbc.queryForObject(
+                "SELECT TIMESTAMPDIFF(SECOND, NOW(3), next_attempt_at) FROM notification WHERE id=" + id,
+                Integer.class);
+        assertThat(diff).isBetween(4, 16);
+        tearDownMock();
+    }
 }

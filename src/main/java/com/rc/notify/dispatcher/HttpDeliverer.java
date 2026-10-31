@@ -50,15 +50,40 @@ public class HttpDeliverer {
                 .build();
     }
 
-    /** 单次投递结果。statusCode 与 errorClass 互斥：HTTP 有响应则前者非空，网络层失败则后者非空。 */
-    public record Outcome(Integer statusCode, String errorClass, long durationMs, String responseSnippet) {
+    /**
+     * 单次投递结果。statusCode 与 errorClass 互斥：HTTP 有响应则前者非空，网络层失败则后者非空。
+     * retryAfterSeconds：对端 Retry-After 头的数值解析结果（秒），非数值/缺失为 null——
+     * 分类与退避的消费决策在 ErrorClassifier/BackoffPolicy，本类只负责忠实搬运（T2.1 文档 §2.4）。
+     */
+    public record Outcome(
+            /** HTTP 状态码；网络层失败时为 null（与 errorClass 互斥）。 */
+            Integer statusCode,
+            /** 网络层失败分类：TIMEOUT/DNS/TLS/CONN_REFUSED/IO；有响应时为 null。 */
+            String errorClass,
+            /** 本次投递耗时（毫秒），含建连与响应读取。 */
+            long durationMs,
+            /** 响应体前 2048 字符，仅排障用；无响应或读取失败时为 null。 */
+            String responseSnippet,
+            /** 对端 Retry-After 的数值秒；缺失或非数值格式时为 null（HTTP-date 不支持）。 */
+            Long retryAfterSeconds
+    ) {
 
         public boolean isSuccess() {
             return statusCode != null && statusCode >= 200 && statusCode < 300;
         }
     }
 
-    public record Target(String method, String url, Map<String, String> headers, byte[] body) {}
+    /** 一次投递的输入，全部为明文（解密与反序列化在上层完成）。 */
+    public record Target(
+            /** HTTP 方法（大写，已过白名单）。 */
+            String method,
+            /** 目标地址，须为 http/https 且带 host。 */
+            String url,
+            /** 需透传的 Header；host/content-length/connection 会被投递器跳过。 */
+            Map<String, String> headers,
+            /** 请求体字节；null 表示无体请求。 */
+            byte[] body
+    ) {}
 
     /**
      * 执行投递。任何网络层异常折叠为 Outcome（errorClass 非空）；程序性错误（URI 非法等）同样折叠，
@@ -85,7 +110,8 @@ public class HttpDeliverer {
                     client.send(rb.build(), HttpResponse.BodyHandlers.ofInputStream());
             String snippet = readSnippet(resp.body());
             long ms = (System.nanoTime() - start) / 1_000_000;
-            return new Outcome(resp.statusCode(), null, ms, snippet);
+            return new Outcome(resp.statusCode(), null, ms, snippet,
+                    parseRetryAfterSeconds(resp.headers().firstValue("Retry-After").orElse(null)));
         } catch (HttpTimeoutException e) {
             return fail(start, "TIMEOUT");
         } catch (UnknownHostException e) {
@@ -111,7 +137,24 @@ public class HttpDeliverer {
 
     private static Outcome fail(long startNanos, String errorClass) {
         long ms = (System.nanoTime() - startNanos) / 1_000_000;
-        return new Outcome(null, errorClass, ms, null);
+        return new Outcome(null, errorClass, ms, null, null);
+    }
+
+    /**
+     * 只解析数值秒格式（RFC 7231 的 HTTP-date 不支持，理由见 T2.1 文档 §2.4：
+     * date 格式需要应用时钟解释"现在"，与 §4.3 约束 3 的 DB 时钟纪律冲突）。
+     * 解析失败静默返回 null——对方的建议是优化不是契约，不能让投递因此失败。
+     */
+    static Long parseRetryAfterSeconds(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            long s = Long.parseLong(value.trim());
+            return s >= 0 ? s : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     /** 只读前 SNIPPET_LIMIT 字节并关闭流——无界读会让失控对端拖住 worker。 */

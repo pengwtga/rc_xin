@@ -145,13 +145,21 @@ public class ClaimRepository {
 
     /** 认领后的任务视图（attemptNo = 自增后的 attempt_count，delivery_attempt 的 attempt_no 与之一致）。 */
     public record Claimed(
+            /** 通知单号（notification.id）。 */
             long id,
+            /** 调用方标识；本层只用于日志与排障，不参与投递。 */
             String callerId,
+            /** 目标地址（接入时已做协议与结构校验）。 */
             String targetUrl,
+            /** 大写 HTTP 方法（接入时已过白名单）。 */
             String httpMethod,
+            /** 加密后的 Header 字节；投递前由 PayloadCodec 解密，可为 null（无自定义头）。 */
             byte[] headersEnc,
+            /** 加密后的请求体字节；可为 null（GET/DELETE 等无体请求）。 */
             byte[] bodyEnc,
+            /** 本次尝试序号，1 起；已含本次认领的自增，直接用于退避计算与明细落库。 */
             int attemptNo,
+            /** 该条通知的重试预算（调用方覆盖值或全局默认），达到即转 DEAD。 */
             int maxAttempts
     ) {}
 }

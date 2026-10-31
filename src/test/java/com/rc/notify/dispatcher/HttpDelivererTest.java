@@ -136,4 +136,21 @@ class HttpDelivererTest {
                 "POST", "::not-a-url::", Map.of(), null));
         assertThat(o.errorClass()).isEqualTo("IO");
     }
+
+    @Test
+    void RetryAfter只解析数值秒_其余一律null() {
+        // 数值格式：解析成功（RFC 7231 的主流实现形态）
+        assertThat(HttpDeliverer.parseRetryAfterSeconds("120")).isEqualTo(120L);
+        assertThat(HttpDeliverer.parseRetryAfterSeconds(" 30 ")).isEqualTo(30L);
+        assertThat(HttpDeliverer.parseRetryAfterSeconds("0")).isZero();
+
+        // HTTP-date 格式：不支持（需应用时钟解释"现在"，与 §4.3 DB 时钟纪律冲突，T2.1 文档 §2.4）
+        assertThat(HttpDeliverer.parseRetryAfterSeconds("Wed, 21 Oct 2026 07:28:00 GMT")).isNull();
+
+        // 缺失 / 空白 / 垃圾 / 负数：静默忽略，绝不让解析失败影响投递结果
+        assertThat(HttpDeliverer.parseRetryAfterSeconds(null)).isNull();
+        assertThat(HttpDeliverer.parseRetryAfterSeconds("")).isNull();
+        assertThat(HttpDeliverer.parseRetryAfterSeconds("abc")).isNull();
+        assertThat(HttpDeliverer.parseRetryAfterSeconds("-5")).isNull();
+    }
 }
