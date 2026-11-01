@@ -35,7 +35,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(properties = {
         "notify.dispatcher.scheduler-enabled=false",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
+        // T2.4：投递期会拦回环/私有地址，测试打的是 127.0.0.1，必须显式放行
+        "notify.ssrf.allowed-hosts=127.0.0.1"
 })
 @EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
 class LeaseRecoveryIntegrationTest {
@@ -147,7 +149,8 @@ class LeaseRecoveryIntegrationTest {
         // A 在 GC 停顿后"复活"，带着同一个 id 的旧结果回来：
         // 无论它说自己成功还是失败，都必须被守卫拒绝——这是"不许把已成功的单子改回待投递"
         assertThat(claims.markSucceeded(id, "deadA/round1", 200)).isFalse();
-        assertThat(claims.markFailed(id, "deadA/round1", "RETRY_WAIT", 10, 500, null)).isFalse();
+        assertThat(claims.markFailed(id, "deadA/round1", 10, 500, "HTTP_5XX")).isFalse();
+        assertThat(claims.markDead(id, "deadA/round1", 500, "HTTP_5XX")).isFalse();
 
         Map<String, Object> row = jdbc.queryForMap(
                 "SELECT status, lease_owner, next_attempt_at FROM notification WHERE id=" + id);

@@ -23,7 +23,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(properties = {
         "notify.dispatcher.scheduler-enabled=false",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
+        // T2.4：投递期会拦回环/私有地址，测试打的是 127.0.0.1，必须显式放行
+        "notify.ssrf.allowed-hosts=127.0.0.1"
 })
 @EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
 class DispatcherIntegrationTest {
@@ -34,6 +36,9 @@ class DispatcherIntegrationTest {
     private ClaimRepository claims;
     @Autowired
     private JdbcTemplate jdbc;
+    /** 造数据必须走真实 codec（T2.4 起是 AES-GCM）：直接写明文会让投递前解密失败。 */
+    @Autowired
+    private com.rc.notify.store.PayloadCodec codec;
 
     private com.sun.net.httpserver.HttpServer mock;
     private int mockPort;
@@ -70,7 +75,8 @@ class DispatcherIntegrationTest {
                      status, attempt_count, max_attempts, next_attempt_at)
                 VALUES ('shop', ?, ?, ?, ?, ?, 'PENDING', 0, ?, NOW(3))
                 """, key, url, method,
-                "{\"Authorization\":\"Bearer tok\"}".getBytes(), "{\"x\":1}".getBytes(), maxAttempts);
+                codec.encodeHeaders(java.util.Map.of("Authorization", "Bearer tok")),
+                codec.encodeBody("{\"x\":1}"), maxAttempts);
     }
 
     private long soleId() {
@@ -185,17 +191,19 @@ class DispatcherIntegrationTest {
                 INSERT INTO notification
                     (caller_id, idempotency_key, target_url, http_method, headers_enc, body_enc,
                      status, attempt_count, max_attempts, next_attempt_at, lease_owner, lease_until)
-                VALUES ('shop', 'e2e_zombie', 'http://stub', 'POST', NULL, NULL,
+                VALUES ('shop', 'e2e_zombie', ?, 'POST', NULL, NULL,
                         'PROCESSING', 1, 10, NOW(3) - INTERVAL 1 MINUTE, 'dead-instance', NOW(3) - INTERVAL 1 SECOND)
-                """);
+                """, "http://127.0.0.1:" + mockPort + "/cb");
         long id = soleId();
 
         int n = dispatcher.pollOnce();
         assertThat(n).isEqualTo(1);
+        // 核心断言：过期租约被回收，attempt_count 又自增了一次
         assertThat(jdbc.queryForObject(
                 "SELECT attempt_count FROM notification WHERE id=" + id, Integer.class)).isEqualTo(2);
-        assertThat(jdbc.queryForObject(
-                "SELECT status FROM notification WHERE id=" + id, String.class)).isEqualTo("PROCESSING");
+        // 投递是异步的，状态可能是"在投"或"已完成"，但不可能还是 PENDING（那说明没被认领）
+        assertThat(jdbc.queryForObject("SELECT status FROM notification WHERE id=" + id, String.class))
+                .isIn("PROCESSING", "SUCCEEDED");
     }
 
     @Test
@@ -261,8 +269,9 @@ class DispatcherIntegrationTest {
                 "SELECT attempt_count FROM notification WHERE id=" + id, Integer.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject(
                 "SELECT last_status_code FROM notification WHERE id=" + id, Integer.class)).isEqualTo(400);
+        // T2.3：4xx 也必须落下失败类别（此前恒为 NULL，导致按 error_class 的告警看不见 4xx）
         assertThat(jdbc.queryForObject(
-                "SELECT last_error_class FROM notification WHERE id=" + id, String.class)).isNull();
+                "SELECT last_error_class FROM notification WHERE id=" + id, String.class)).isEqualTo("HTTP_4XX");
 
         // 再轮询不动 DEAD 行
         dispatcher.pollOnce();

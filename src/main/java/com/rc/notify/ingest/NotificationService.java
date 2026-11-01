@@ -5,13 +5,12 @@ import com.rc.notify.config.AuthProperties;
 import com.rc.notify.config.NotifyProperties;
 import com.rc.notify.ingest.dto.SubmitNotificationRequest;
 import com.rc.notify.ingest.dto.SubmitNotificationResponse;
+import com.rc.notify.security.SsrfGuard;
 import com.rc.notify.store.NotificationRepository;
 import com.rc.notify.store.PayloadCodec;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Set;
@@ -38,11 +37,15 @@ public class NotificationService {
     private final NotificationRepository repository;
     private final PayloadCodec codec;
     private final NotifyProperties props;
+    /** 出站目标校验（T2.4）：受理期只做不碰网络的判定，投递期才是真正的防线。 */
+    private final SsrfGuard ssrf;
 
-    public NotificationService(NotificationRepository repository, PayloadCodec codec, NotifyProperties props) {
+    public NotificationService(NotificationRepository repository, PayloadCodec codec, NotifyProperties props,
+                               SsrfGuard ssrf) {
         this.repository = repository;
         this.codec = codec;
         this.props = props;
+        this.ssrf = ssrf;
     }
 
     public SubmitNotificationResponse submit(SubmitNotificationRequest req, AuthProperties.Client caller) {
@@ -82,22 +85,19 @@ public class NotificationService {
 
     // ——— 业务校验：失败一律 422，message 指向具体字段 ———
 
+    /**
+     * 目标地址校验（T2.4 起委托给 {@link SsrfGuard}）。
+     *
+     * <p>这里的校验只做"不需要网络"的判定：协议、host 形态、IP 字面量落段。真正的 SSRF 防线在
+     * 投递期（重新解析域名并校验每个 IP）——受理路径不能依赖 DNS，否则解析抖动会变成
+     * "调用方收到 422 但其实是我们的 DNS 出问题"。
+     */
     private String validateTargetUrl(String raw) {
         String url = raw.trim();
-        URI uri;
-        try {
-            uri = new URI(url);
-        } catch (URISyntaxException e) {
-            throw ApiException.validation("target_url 不是合法 URL: " + e.getMessage());
+        SsrfGuard.Verdict verdict = ssrf.checkForIngest(url);
+        if (!verdict.allowed()) {
+            throw ApiException.validation("target_url " + verdict.detail());
         }
-        String scheme = uri.getScheme();
-        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
-            throw ApiException.validation("target_url 只支持 http/https，当前: " + scheme);
-        }
-        if (uri.getHost() == null || uri.getHost().isBlank()) {
-            throw ApiException.validation("target_url 缺少 host");
-        }
-        // SSRF 白名单与私有 IP 拦截属 T2.4，此处只做协议与结构校验
         return url;
     }
 

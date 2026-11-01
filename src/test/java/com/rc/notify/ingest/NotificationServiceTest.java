@@ -3,15 +3,19 @@ package com.rc.notify.ingest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rc.notify.api.ApiException;
 import com.rc.notify.config.AuthProperties;
+import com.rc.notify.config.CryptoProperties;
 import com.rc.notify.config.NotifyProperties;
+import com.rc.notify.config.SsrfProperties;
 import com.rc.notify.ingest.dto.SubmitNotificationRequest;
+import com.rc.notify.security.SsrfGuard;
+import com.rc.notify.store.AesGcmPayloadCodec;
 import com.rc.notify.store.NotificationRepository;
-import com.rc.notify.store.PlaintextPayloadCodec;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -27,6 +31,9 @@ import static org.mockito.Mockito.verify;
  */
 class NotificationServiceTest {
 
+    /** 与 application.yml 默认值一致的开发密钥（base64 的 32 字节）。 */
+    private static final String DEV_KEY = "ZGV2LW9ubHktMzJieXRlLWtleS1kby1ub3QtdXNlISE=";
+
     private NotificationRepository repository;
     private NotificationService service;
     private final AuthProperties.Client caller = new AuthProperties.Client("k_shop", "shop", null);
@@ -40,7 +47,10 @@ class NotificationServiceTest {
                 new NotifyProperties.Backoff(10_000, 3_600_000, 0.5),
                 new NotifyProperties.Retry(10),
                 new NotifyProperties.Backpressure(100_000, 30));
-        service = new NotificationService(repository, new PlaintextPayloadCodec(new ObjectMapper()), props);
+        service = new NotificationService(repository,
+                new AesGcmPayloadCodec(new CryptoProperties(DEV_KEY)),
+                props,
+                new SsrfGuard(new SsrfProperties(List.of(), true)));
     }
 
     private SubmitNotificationRequest req(String url, String method, Map<String, String> headers, String body) {

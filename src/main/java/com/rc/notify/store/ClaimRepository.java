@@ -65,7 +65,22 @@ public class ClaimRepository {
 
     private static final String MARK_FAILED = """
             UPDATE notification
-            SET status = ?, next_attempt_at = DATE_ADD(NOW(3), INTERVAL ? SECOND),
+            SET status = 'RETRY_WAIT', next_attempt_at = DATE_ADD(NOW(3), INTERVAL ? SECOND),
+                last_status_code = ?, last_error_class = ?,
+                lease_owner = NULL, lease_until = NULL
+            WHERE id = ? AND lease_owner = ? AND status = 'PROCESSING'
+            """;
+
+    /**
+     * 死信落库（T2.3）。故意<b>不动 next_attempt_at</b>。
+     *
+     * <p>DEAD 行不会再被调度，改写 next_attempt_at 只会把一个"永远不会被认领的时刻"混进
+     * idx_due 的区间里，让"队列里还有多少到期任务"这类查询需要额外过滤。保留最后一次计划投递时刻，
+     * 复盘时还能回答"它本来该在什么时候再试一次"。死信时间看 updated_at。
+     */
+    private static final String MARK_DEAD = """
+            UPDATE notification
+            SET status = 'DEAD',
                 last_status_code = ?, last_error_class = ?,
                 lease_owner = NULL, lease_until = NULL
             WHERE id = ? AND lease_owner = ? AND status = 'PROCESSING'
@@ -105,14 +120,25 @@ public class ClaimRepository {
     }
 
     /**
-     * 失败落库。
+     * 可重试失败落库：状态改为 RETRY_WAIT 并排下一次到期时刻。
      *
-     * @param nextStatus RETRY_WAIT（还有预算）或 DEAD（预算耗尽），由调用方判定
-     * @param delayS     退避秒数（T1.2 为最小指数退避，T2.1 换 ErrorClassifier + 全抖动）
+     * @param delayS   退避秒数（T2.1：指数退避 + 全抖动，或对端 Retry-After）
+     * @param statusCode 本次 HTTP 状态码，网络层失败为 null
+     * @param errorClass 失败类别（由 ErrorClassifier 判定，与晋级决策同源——T2.3）
+     * @return false = 守卫失败（租约已转移），调用方丢弃结果
      */
-    public boolean markFailed(long id, String leaseOwner, String nextStatus, long delayS,
+    public boolean markFailed(long id, String leaseOwner, long delayS,
                               Integer statusCode, String errorClass) {
-        return jdbc.update(MARK_FAILED, nextStatus, delayS, statusCode, errorClass, id, leaseOwner) == 1;
+        return jdbc.update(MARK_FAILED, delayS, statusCode, errorClass, id, leaseOwner) == 1;
+    }
+
+    /**
+     * 死信落库（T2.3）：状态改为终态 DEAD，清租约，不动 next_attempt_at（见 MARK_DEAD 注释）。
+     *
+     * @return false = 守卫失败（租约已转移，结果过期），调用方丢弃且<b>不得</b>发死信事件
+     */
+    public boolean markDead(long id, String leaseOwner, Integer statusCode, String errorClass) {
+        return jdbc.update(MARK_DEAD, statusCode, errorClass, id, leaseOwner) == 1;
     }
 
     /** 逐次明细：只追加、无条件插入（无论守卫成败，这次 HTTP 真实发生过）。 */

@@ -42,6 +42,15 @@ notify:
       - api-key: k_inventory
         caller-id: inventory
         max-attempts: 6          # 可按接入方覆盖重试预算（默认取 notify.retry.max-attempts）
+  # 凭证与请求体加密（T2.4）：headers_enc / body_enc 落库前用 AES-256-GCM 加密。
+  # 仓库内是开发密钥（启动会打 WARN），生产必须注入：export NOTIFY_CRYPTO_KEY=$(openssl rand -base64 32)
+  crypto:
+    key: ${NOTIFY_CRYPTO_KEY:ZGV2LW9ubHktMzJieXRlLWtleS1kby1ub3QtdXNlISE=}
+  # 出站目标安全策略（T2.4）：默认禁止任何回环/私有/链路本地/CGNAT 目标，非白名单目标强制 https。
+  # 白名单只放内网自建回调；生产应为空。开发/演示用：export NOTIFY_SSRF_ALLOWED_HOSTS=127.0.0.1
+  ssrf:
+    allowed-hosts: ${NOTIFY_SSRF_ALLOWED_HOSTS:}
+    require-https: true
   dispatcher:
     # 测试环境置 false，改为手动调用 pollOnce()（设计文档 §9.2 用例 7）
     scheduler-enabled: ${NOTIFY_SCHEDULER_ENABLED:true}
@@ -61,7 +70,7 @@ notify:
   backpressure:
     max-pending: 100000          # ~10 分钟消化时间（172 QPS 消费速率）
     max-oldest-age-minutes: 30   # p99 SLA(5s) 的 360 倍，明确异常信号
-  # 失败分类无配置项：4xx → PERMANENT、5xx/网络错误 → RETRYABLE 是硬编码语义。
+  # 失败分类无配置项：3xx/4xx → PERMANENT、5xx/网络错误 → RETRYABLE 是硬编码语义。
   # "某供应商用 400 表示系统忙"不做端点覆盖表（T2.1 文档 §2.3：替下游接口不规范买单，
   # 且假设同 host 语义一致）。真有不得不的原因，改 ErrorClassifier 一行代码，不走配置。
 

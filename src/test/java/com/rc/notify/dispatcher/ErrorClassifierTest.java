@@ -74,9 +74,38 @@ class ErrorClassifierTest {
     }
 
     @Test
-    void 三百系按可重试兜底_跟随与否是SSRF校验的职责() {
-        assertThat(classifier.classify(http(302)).type())
-                .isEqualTo(ErrorClassifier.Type.RETRYABLE);
+    void 三百系一次即死_禁重定向后3xx是配置错误而非暂时故障() {
+        // T2.3 修正：投递器禁重定向，302 意味着目标地址变了或对端把请求转去登录页；
+        // 重试 10 次只会拿到同一条 302，属"配置问题"，不该花预算
+        for (int code : new int[]{301, 302, 304, 307}) {
+            assertThat(classifier.classify(http(code)).type())
+                    .as("statusCode=%d", code).isEqualTo(ErrorClassifier.Type.PERMANENT);
+        }
+    }
+
+    // ——— T2.3：error_class 由分类器统一产生，与晋级决策同源 ———
+
+    @Test
+    void errorClass按百位归组_有响应时与状态码一致() {
+        assertThat(classifier.classify(http(302)).errorClass()).isEqualTo(ErrorClassifier.HTTP_3XX);
+        assertThat(classifier.classify(http(400)).errorClass()).isEqualTo(ErrorClassifier.HTTP_4XX);
+        assertThat(classifier.classify(http(404)).errorClass()).isEqualTo(ErrorClassifier.HTTP_4XX);
+        assertThat(classifier.classify(http(429)).errorClass()).isEqualTo(ErrorClassifier.HTTP_4XX);
+        assertThat(classifier.classify(http(500)).errorClass()).isEqualTo(ErrorClassifier.HTTP_5XX);
+        assertThat(classifier.classify(http(503)).errorClass()).isEqualTo(ErrorClassifier.HTTP_5XX);
+    }
+
+    @Test
+    void errorClass在网络层沿用投递器的折叠结果() {
+        for (String ec : new String[]{"TIMEOUT", "DNS", "TLS", "CONN_REFUSED", "IO"}) {
+            assertThat(classifier.classify(network(ec)).errorClass()).as("errorClass=%s", ec).isEqualTo(ec);
+        }
+    }
+
+    @Test
+    void 成功不留errorClass_避免分组查询多一行噪声() {
+        assertThat(classifier.classify(http(200)).errorClass()).isNull();
+        assertThat(classifier.classify(http(204)).errorClass()).isNull();
     }
 
     @Test

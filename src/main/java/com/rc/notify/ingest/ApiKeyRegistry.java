@@ -28,6 +28,13 @@ public class ApiKeyRegistry {
                 throw new IllegalStateException(
                         "[启动自检失败] api-key=%s 缺少 caller-id".formatted(client.apiKey()));
             }
+            // 预算下界（T2.3）：max_attempts 是"总尝试次数"而非"重试次数"，0 表示一次都不投——
+            // 那不该用配置表达，用配置表达的结果是任务静默进 DEAD、且没有任何一次 HTTP 发生过
+            if (client.maxAttempts() != null && client.maxAttempts() < 1) {
+                throw new IllegalStateException(
+                        "[启动自检失败] caller-id=%s 的 max-attempts(%d) 必须 >= 1（它是最多尝试次数，含首次投递）"
+                                .formatted(client.callerId(), client.maxAttempts()));
+            }
             if (map.putIfAbsent(client.apiKey(), client) != null) {
                 throw new IllegalStateException(
                         "[启动自检失败] api-key=%s 被多个 client 重复配置".formatted(client.apiKey()));
