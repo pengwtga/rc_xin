@@ -74,4 +74,33 @@ class StartupGuardTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("cap-ms");
     }
+
+    /** 与 application.yml 默认值一致的熔断配置。 */
+    private CircuitProperties circuit() {
+        return new CircuitProperties(true, 60, 20, 0.5, 60_000, 1, 16, 30, 2, 10_000);
+    }
+
+    @Test
+    void 默认熔断配置应通过自检() {
+        assertThatCode(() -> StartupGuard.validateCircuit(circuit(), valid()))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void 单端点并发超过worker池应拒绝启动_否则隔离静默失效() {
+        // worker 池 200、单端点上限 500：池里最多只有 200 个在途，这个上限永远拦不住任何请求
+        var broken = new CircuitProperties(true, 60, 20, 0.5, 60_000, 1, 500, 30, 2, 10_000);
+        assertThatThrownBy(() -> StartupGuard.validateCircuit(broken, valid()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("max-concurrent-per-endpoint")
+                .hasMessageContaining("永远不会生效");
+    }
+
+    @Test
+    void 跳过延迟为零应拒绝启动_避免认领退还热循环() {
+        var broken = new CircuitProperties(true, 60, 20, 0.5, 60_000, 1, 16, 0, 2, 10_000);
+        assertThatThrownBy(() -> StartupGuard.validateCircuit(broken, valid()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("skip-delay-seconds");
+    }
 }

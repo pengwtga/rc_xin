@@ -15,8 +15,9 @@ public class StartupGuard {
     /** lease 必须比 HTTP 总超时多出的安全余量（结果落库 + 调度/时钟抖动）。 */
     static final long LEASE_MARGIN_MS = 5_000;
 
-    public StartupGuard(NotifyProperties props) {
+    public StartupGuard(NotifyProperties props, CircuitProperties circuit) {
         validate(props);
+        validateCircuit(circuit, props);
     }
 
     /** 静态方法便于单元测试（不依赖 Spring 上下文）。 */
@@ -56,6 +57,36 @@ public class StartupGuard {
                 "notify.backpressure.max-pending 必须为正数");
         require(p.backpressure().maxOldestAgeMinutes() > 0,
                 "notify.backpressure.max-oldest-age-minutes 必须为正数");
+    }
+
+    /**
+     * 端点隔离与熔断的取值自检（T2.5）。
+     *
+     * <p>最关键的一条是 {@code maxConcurrentPerEndpoint <= workerPoolSize}：超过的话信号量永远不会
+     * 真正拦住任何请求（池里最多就 workerPoolSize 个在途），配置者以为隔离生效了，实际一点没生效——
+     * 这种"静默失效"比报错难查得多。
+     */
+    static void validateCircuit(CircuitProperties c, NotifyProperties p) {
+        require(c != null, "缺少 notify.circuit.* 配置");
+        if (!c.enabled()) {
+            return;
+        }
+        require(c.windowSeconds() > 0, "notify.circuit.window-seconds 必须为正数");
+        require(c.minSamples() > 0, "notify.circuit.min-samples 必须为正数");
+        require(c.failureRateThreshold() > 0 && c.failureRateThreshold() <= 1,
+                "notify.circuit.failure-rate-threshold(%s) 必须在 (0, 1] 区间"
+                        .formatted(c.failureRateThreshold()));
+        require(c.openMs() > 0, "notify.circuit.open-ms 必须为正数");
+        require(c.halfOpenProbes() >= 1, "notify.circuit.half-open-probes 必须 >= 1");
+        int pool = p.dispatcher().workerPoolSize();
+        require(c.maxConcurrentPerEndpoint() > 0 && c.maxConcurrentPerEndpoint() <= pool,
+                ("notify.circuit.max-concurrent-per-endpoint(%d) 必须 > 0 且 <= worker-pool-size(%d)，"
+                        + "否则这个上限永远不会生效（池里最多只有 worker-pool-size 个在途）")
+                        .formatted(c.maxConcurrentPerEndpoint(), pool));
+        require(c.skipDelaySeconds() >= 1,
+                "notify.circuit.skip-delay-seconds 必须 >= 1（0 会形成「认领-退还」热循环）");
+        require(c.permitDelaySeconds() >= 1, "notify.circuit.permit-delay-seconds 必须 >= 1");
+        require(c.maxTrackedEndpoints() > 0, "notify.circuit.max-tracked-endpoints 必须为正数");
     }
 
     private static void require(boolean ok, String message) {

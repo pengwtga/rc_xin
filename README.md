@@ -24,7 +24,7 @@ curl -s http://localhost:8080/actuator/health   # -> {"status":"UP"}
 
 - [x] **M0** 骨架可启动、可迁移、可测试（T0.1 结构 / T0.2 建表 / T0.3 启动自检）
 - [x] **M1** 能存能投（T1.1 接入接口 / T1.2 投递引擎 / T1.3 幂等去重）
-- [ ] M2 可靠投递（T2.1 失败分级 ✔ / T2.2 租约恢复 ✔ / T2.3 死信终态 ✔ / T2.4 出站安全 ✔ / T2.5 熔断隔离）
+- [x] **M2** 可靠投递（T2.1 失败分级 / T2.2 租约恢复 / T2.3 死信终态 / T2.4 出站安全 / T2.5 端点隔离与熔断）
 - [ ] M3 可观测与运维（查询 / 重放 / 指标 / 背压 / 归档）
 - [ ] M4 交付（压测 / README / AI 会话记录）
 
@@ -40,14 +40,17 @@ bash scripts/dead_letter_demo.sh
 # 出站安全：metadata/内网地址被拒 422、凭证密文入库、投递期拦下绕过接入的内网目标（约 10s）
 bash scripts/ssrf_demo.sh
 
+# 端点隔离：一个供应商恒 500，熔断后任务只推迟不烧预算；另一个供应商全部成功（约 25s）
+bash scripts/circuit_breaker_demo.sh
+
 # 慢/坏下游，供手工验收
 python3 scripts/mock_downstream.py --port 9001 --sleep 20   # 触发 15s 超时
 python3 scripts/mock_downstream.py --port 9001 --status 500 # 触发可重试失败
 ```
 
-原理与取舍见 `docs/T2.2-租约与崩溃恢复.md`、`docs/T2.3-死信终态与尝试预算.md`、`docs/T2.4-出站安全与凭证加密.md`。
+原理与取舍见 `docs/T2.2-租约与崩溃恢复.md`、`docs/T2.3-死信终态与尝试预算.md`、`docs/T2.4-出站安全与凭证加密.md`、`docs/T2.5-端点隔离与熔断.md`。
 
 ## 配置
 
 全部参数收口在 `application.yml` 的 `notify.*`，启动自检（`StartupGuard`）保证：
-租约 > HTTP 总超时 + 余量、批大小 ≤ worker 池等约束被破坏时**拒绝启动**。
+租约 > HTTP 总超时 + 余量、批大小 ≤ worker 池、单端点并发 ≤ worker 池等约束被破坏时**拒绝启动**。

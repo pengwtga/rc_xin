@@ -93,6 +93,35 @@ public class ClaimRepository {
             """;
 
     /**
+     * 跳过退还（T2.5）：熔断中或端点并发已满时，把已认领的任务原样放回队列。
+     *
+     * <p>三个要点，每一个写错都出事：
+     * <ul>
+     *   <li><b>{@code attempt_count = attempt_count - 1}</b>——认领时自增过（T1.2：worker 崩溃后没人执行
+     *       "完成后自增"），这里必须退回来。否则供应商挂 30 分钟，排队中的健康任务会被我们自己烧成 DEAD：
+     *       明明是对方的问题，却耗光我方重试预算，等对方恢复时任务已经死了（设计文档 §4.5）；</li>
+     *   <li><b>不写 {@code delivery_attempt}</b>——这次 HTTP 一个字节都没发出，写明细既不是事实，
+     *       还会埋一个唯一键冲突：{@code attempt_no} 等于退还后的 {@code attempt_count}，下次认领会用
+     *       同一个号，{@code uk_n_attempt} 直接撞车，任务卡在 PROCESSING 直到租约过期；</li>
+     *   <li><b>带 {@code lease_owner} 守卫</b>——与状态落库同一条规矩：租约已被他人接管时不碰那行。</li>
+     * </ul>
+     *
+     * <p>状态写 {@code RETRY_WAIT} 而不是 {@code PENDING}：调度上两者等价（认领条件同时包含），
+     * 但"已经有过尝试"的行标成 PENDING 会误导排查。退还后"到底试过几次"看 {@code attempt_count}，
+     * 而不是看状态——这是本系统唯一一处"状态=RETRY_WAIT 但没有真的尝试"的情形。
+     */
+    private static final String RELEASE_SKIPPED_TEMPLATE = """
+            UPDATE notification
+            SET status        = 'RETRY_WAIT',
+                attempt_count = attempt_count - 1,
+                next_attempt_at = DATE_ADD(NOW(3), INTERVAL ? SECOND),
+                lease_owner   = NULL,
+                lease_until   = NULL
+            WHERE lease_owner = ? AND status = 'PROCESSING' AND attempt_count > 0
+              AND id IN (%s)
+            """;
+
+    /**
      * 认领一批到期（或租约过期）任务。短事务：UPDATE + 回读，行锁随提交释放。
      *
      * @param leaseOwner 实例ID/轮次token，同时是后续状态落库的守卫键
@@ -139,6 +168,30 @@ public class ClaimRepository {
      */
     public boolean markDead(long id, String leaseOwner, Integer statusCode, String errorClass) {
         return jdbc.update(MARK_DEAD, statusCode, errorClass, id, leaseOwner) == 1;
+    }
+
+    /**
+     * 跳过退还（T2.5）：把一批"没有真正投递"的任务放回队列，并<b>退回尝试预算</b>。
+     *
+     * <p>批量形态的存在理由很实际：熔断期间每一轮 poll 都会认领到一批同端点的行，
+     * 逐条退还是 N 次 UPDATE；一次 {@code id IN (...)} 就够，写放大差两个数量级。
+     *
+     * @param ids    本轮的这批任务（全部属于调用方持有的 leaseOwner）
+     * @param delayS 推迟秒数（熔断中较长，并发满时较短，均带抖动）
+     * @return 真正退还的行数；小于 ids.size() 说明部分行的租约已被接管（正常竞争，不是错误）
+     */
+    public int releaseSkipped(String leaseOwner, List<Long> ids, long delayS) {
+        if (ids == null || ids.isEmpty()) {
+            return 0;
+        }
+        String placeholders = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+        Object[] args = new Object[ids.size() + 2];
+        args[0] = delayS;
+        args[1] = leaseOwner;
+        for (int i = 0; i < ids.size(); i++) {
+            args[i + 2] = ids.get(i);
+        }
+        return jdbc.update(RELEASE_SKIPPED_TEMPLATE.formatted(placeholders), args);
     }
 
     /** 逐次明细：只追加、无条件插入（无论守卫成败，这次 HTTP 真实发生过）。 */

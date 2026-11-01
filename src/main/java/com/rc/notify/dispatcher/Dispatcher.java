@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -52,6 +53,8 @@ public class Dispatcher {
     private final BackoffPolicy backoff;
     /** 出站目标校验（T2.4）：投递前重新解析并校验，是 SSRF 的真正防线。 */
     private final SsrfGuard ssrf;
+    /** 端点隔离与熔断（T2.5）：per-endpoint 并发上限 + 失败率熔断。 */
+    private final EndpointGate gate;
     /** 投递线程池，线程数 = workerPoolSize。 */
     private final ThreadPoolExecutor workers;
     /**
@@ -71,10 +74,18 @@ public class Dispatcher {
      */
     private final AtomicLong staleResults = new AtomicLong();
 
+    /**
+     * 被跳过（熔断中 / 端点并发满）而退还的任务累计数（T2.5）。
+     *
+     * <p>这个数和 {@link #staleResults} 的区别值得说清：staleResults 是"我们自己的问题"（投递超过了租约），
+     * skipped 是"下游的问题"（它在故障或被我们限流）。M3 接指标时两者的告警处置完全不同。
+     */
+    private final AtomicLong skipped = new AtomicLong();
+
     /** 投递线程池：一个投递 = 一个线程，"空闲 worker 数"由 JVM 免费维护（参数定值依据 §3.5.1）。 */
     public Dispatcher(NotifyProperties props, ClaimRepository claims, HttpDeliverer deliverer, PayloadCodec codec,
                       ErrorClassifier classifier, BackoffPolicy backoff, List<DeadLetterSink> deadLetterSinks,
-                      SsrfGuard ssrf) {
+                      SsrfGuard ssrf, EndpointGate gate) {
         this.props = props;
         this.claims = claims;
         this.deliverer = deliverer;
@@ -83,6 +94,7 @@ public class Dispatcher {
         this.backoff = backoff;
         this.deadLetterSinks = List.copyOf(deadLetterSinks);
         this.ssrf = ssrf;
+        this.gate = gate;
         this.workers = (ThreadPoolExecutor) Executors.newFixedThreadPool(
                 props.dispatcher().workerPoolSize(), new java.util.concurrent.ThreadFactory() {
                     private final AtomicInteger seq = new AtomicInteger();
@@ -117,14 +129,54 @@ public class Dispatcher {
         }
         String roundToken = instanceId + "/" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         List<ClaimRepository.Claimed> claimed = claims.claim(roundToken, batch, leaseTtlSeconds());
+
+        // 熔断中的端点不进线程池（T2.5）：认领后立刻整批退还，一条 UPDATE 解决。
+        // 放在提交之前而不是 worker 里，是因为"已确定发不出去"的行没必要占一个线程再退出来
+        List<Long> deferred = new ArrayList<>();
         for (ClaimRepository.Claimed c : claimed) {
+            if (gate.isOpen(EndpointGate.endpointOf(c.targetUrl()))) {
+                deferred.add(c.id());
+                continue;
+            }
             workers.submit(() -> deliverOne(c, roundToken));
+        }
+        if (!deferred.isEmpty()) {
+            long delayS = gate.skipDelaySeconds(true);
+            try {
+                int released = claims.releaseSkipped(roundToken, deferred, delayS);
+                skipped.addAndGet(released);
+                log.debug("{} 条任务因端点熔断被退还（推迟 {}s，不消耗尝试预算）", released, delayS);
+            } catch (Exception e) {
+                // 退还失败等于这些行停在 PROCESSING：不丢，租约过期后会被重新认领（与落库失败同一兜底）
+                log.error("熔断退还失败（{} 条），等租约过期回收: {}", deferred.size(), e.toString());
+            }
         }
         return claimed.size();
     }
 
-    /** 投递线程的异常边界：decode / HTTP / 落库任何一步出错都不允许杀死线程或让行卡死。 */
+    /**
+     * 投递线程的异常边界：decode / HTTP / 落库任何一步出错都不允许杀死线程或让行卡死。
+     *
+     * <p>入口先过端点闸门（T2.5）。被拒时<b>退还</b>而不是记失败——这不是"投递失败"，是"这次先不发"。
+     * 把拒绝当失败处理，就正好踩中设计文档 §4.5 那个"最容易漏掉的细节"：供应商挂 30 分钟，
+     * 排队中的健康任务被我们自己烧成 DEAD。
+     */
     private void deliverOne(ClaimRepository.Claimed c, String roundToken) {
+        String endpoint = EndpointGate.endpointOf(c.targetUrl());
+        EndpointGate.Permit permit = gate.tryEnter(endpoint);
+        if (permit == null) {
+            boolean circuitOpen = gate.isOpen(endpoint);
+            skip(c, roundToken, gate.skipDelaySeconds(circuitOpen),
+                    circuitOpen ? "端点熔断中" : "端点并发已满");
+            return;
+        }
+        try (permit) {
+            deliverWithPermit(c, roundToken, endpoint);
+        }
+    }
+
+    /** 持有端点配额期间的投递与落库（T1.2 起的主体逻辑）。 */
+    private void deliverWithPermit(ClaimRepository.Claimed c, String roundToken, String endpoint) {
         long startMs = System.currentTimeMillis();
         HttpDeliverer.Outcome outcome;
         try {
@@ -152,6 +204,13 @@ public class Dispatcher {
         try {
             // 先分类、再落库：error_class 必须与晋级决策出自同一次判断，否则两者会漂移（T2.3 §2.3）
             ErrorClassifier.Decision decision = classifier.classify(outcome);
+
+            // 端点健康度（T2.5）：只统计"可能自愈的失败"。4xx/3xx/SSRF 拒绝不计入——
+            // 那是我们请求的问题，不是端点健康度；计入就等于让一个配错凭证的 caller
+            // 把共用该端点的所有 caller 一起熔断掉
+            if (decision.type() != ErrorClassifier.Type.PERMANENT) {
+                gate.record(endpoint, decision.type() == ErrorClassifier.Type.RETRYABLE);
+            }
 
             // 明细无条件落库：这次 HTTP 真实发生过，无论状态守卫成败都要留痕（T1.2 文档 §2.5）
             claims.insertAttempt(c.id(), c.attemptNo(), new Timestamp(startMs),
@@ -196,6 +255,26 @@ public class Dispatcher {
         } catch (Exception e) {
             // 落库失败：行仍处于 PROCESSING，租约过期后会被重新认领——不丢，只是多一次尝试
             log.error("任务 {} 结果落库失败，等待租约过期回收: {}", c.id(), e.toString());
+        }
+    }
+
+    /**
+     * 退还一条被跳过的任务（T2.5）：退预算、不写明细、稍后再试。
+     *
+     * <p>与失败落库的区别只在 {@code attempt_count}：都写 {@code RETRY_WAIT}，但这里把它减回去。
+     * 所以"到底试过几次"只能看 {@code attempt_count}，不能看状态。
+     */
+    private void skip(ClaimRepository.Claimed c, String roundToken, long delayS, String why) {
+        try {
+            if (claims.releaseSkipped(roundToken, List.of(c.id()), delayS) == 1) {
+                skipped.incrementAndGet();
+                log.debug("任务 {} 被跳过（{}），推迟 {}s 后再试，不消耗尝试预算", c.id(), why, delayS);
+            } else {
+                // 守卫失败：租约已转移（本实例被判死过）。与状态落库同一条规矩——不碰别人的行
+                log.warn("任务 {} 退还时守卫失败（租约已转移），本次跳过无副作用", c.id());
+            }
+        } catch (Exception e) {
+            log.error("任务 {} 退还失败，等租约过期回收: {}", c.id(), e.toString());
         }
     }
 
@@ -270,5 +349,10 @@ public class Dispatcher {
     /** 本实例被守卫丢弃的结果累计数（T2.2：崩溃/长 GC 发生过的直接信号）。 */
     public long staleResults() {
         return staleResults.get();
+    }
+
+    /** 本实例因熔断/并发上限而退还的任务累计数（T2.5：下游故障的信号，与我方问题区分）。 */
+    public long skipped() {
+        return skipped.get();
     }
 }

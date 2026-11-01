@@ -51,6 +51,20 @@ notify:
   ssrf:
     allowed-hosts: ${NOTIFY_SSRF_ALLOWED_HOSTS:}
     require-https: true
+  # 端点隔离与熔断（T2.5）：一个供应商变慢，不该把 200 个 worker 全占了让别人排队。
+  # 两层强度不同：并发上限在故障早期就生效（不需要判断"是否故障"）；熔断器在故障确认后
+  # 停止无效尝试并保住重试预算（不是限流）。跳过一律退预算——见 Dispatcher#skip。
+  circuit:
+    enabled: ${NOTIFY_CIRCUIT_ENABLED:true}
+    window-seconds: 60            # 失败率统计窗口（6 桶 × 10s 的滑动窗口）
+    min-samples: 20               # 样本不足时"2 次里 2 次失败"是噪声不是故障
+    failure-rate-threshold: 0.5   # 超过即 OPEN；不用 1.0 是因为全失败时已白打 20 次
+    open-ms: 60000                # OPEN 时长：与窗口同量级，短了没等对方恢复又打一轮
+    half-open-probes: 1           # 半开只放一个探针，成功才恢复全量（防恢复瞬间惊群）
+    max-concurrent-per-endpoint: 16  # 200 worker / 约 12 个活跃端点，给单端点留 8 倍余量
+    skip-delay-seconds: 30        # 熔断期间的任务推迟多久（带 ±20% 抖动）
+    permit-delay-seconds: 2       # 并发满只是排队，短延迟让它尽快回来
+    max-tracked-endpoints: 10000  # 端点键来自 URL，不设上限就是一条内存耗尽路径
   dispatcher:
     # 测试环境置 false，改为手动调用 pollOnce()（设计文档 §9.2 用例 7）
     scheduler-enabled: ${NOTIFY_SCHEDULER_ENABLED:true}
