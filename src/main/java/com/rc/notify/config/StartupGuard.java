@@ -57,6 +57,8 @@ public class StartupGuard {
                 "notify.backpressure.max-pending 必须为正数");
         require(p.backpressure().maxOldestAgeMinutes() > 0,
                 "notify.backpressure.max-oldest-age-minutes 必须为正数");
+        require(p.backpressure().retryAfterSeconds() >= 1,
+                "notify.backpressure.retry-after-seconds 必须 >= 1（0 等于让调用方立刻重试，背压失效）");
     }
 
     /**

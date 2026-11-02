@@ -2,6 +2,7 @@ package com.rc.notify.api;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -10,6 +11,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.stream.Collectors;
 
@@ -26,7 +28,12 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<ApiError> handleApi(ApiException e) {
-        return ResponseEntity.status(e.status()).body(new ApiError(e.code(), e.getMessage()));
+        ResponseEntity.BodyBuilder builder = ResponseEntity.status(e.status());
+        // 503 背压必须带 Retry-After（T3.3）：不带的话调用方只能立刻重试，把背压变成雪崩
+        if (e.retryAfterSeconds() != null) {
+            builder.header(HttpHeaders.RETRY_AFTER, String.valueOf(e.retryAfterSeconds()));
+        }
+        return builder.body(new ApiError(e.code(), e.getMessage()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -64,6 +71,20 @@ public class ApiExceptionHandler {
         return ResponseEntity.badRequest().body(new ApiError("INVALID_PARAMETER",
                 "参数 %s 格式非法: %s（期望 %s）".formatted(
                         e.getName(), raw, e.getRequiredType() == null ? "?" : e.getRequiredType().getSimpleName())));
+    }
+
+    /**
+     * 路径不存在（T3.3 顺手修的同类坑）。
+     *
+     * <p>Spring 6.1 起"没有匹配的 handler"抛 {@link NoResourceFoundException}，
+     * 而它同样会落到下面的 {@code Exception} 兜底，于是调用方请求一个写错的路径拿到的是
+     * <b>500 服务内部错误</b>——和 T3.1 的 `/abc` 是同一个病：客户端问题被报成服务端故障，
+     * 告警会响、错误率指标被污染。这里明确回 404。
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiError> handleNoResource(NoResourceFoundException e) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(new ApiError("NOT_FOUND", "路径不存在: /" + e.getResourcePath()));
     }
 
     @ExceptionHandler(Exception.class)

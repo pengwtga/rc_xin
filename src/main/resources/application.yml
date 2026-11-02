@@ -84,6 +84,18 @@ notify:
   backpressure:
     max-pending: 100000          # ~10 分钟消化时间（172 QPS 消费速率）
     max-oldest-age-minutes: 30   # p99 SLA(5s) 的 360 倍，明确异常信号
+    retry-after-seconds: 30      # 拒绝时让调用方等 30s：短了等于没背压（立刻回来），长了业务回调整体推迟
+  # 队列健康度采样（T3.3）：监控抓取只读内存快照，不查库（见 QueueSampler 类注释）
+  metrics:
+    sample-interval-ms: 10000    # 10s：相对 30 分钟的背压阈值可忽略，同时把查库频率压到可接受
+  # 归档（T3.3）：只清密文列，不删行——行是"这条为什么没到"的唯一证据
+  archive:
+    enabled: ${NOTIFY_ARCHIVE_ENABLED:true}
+    cron: "0 30 3 * * *"         # 凌晨 3:30：业务低峰，且离"前一天 24h 边界"最近
+    success-retention-hours: 24  # 成功单：投递已完成，请求体只剩当天排障的价值
+    failure-retention-days: 7    # 失败终态：要撑到人工重放（重放常发生在供应商修好之后）
+    batch-size: 1000             # 单批 1000 行：锁持有时间毫秒级，不挡认领
+    max-batches-per-run: 100     # 单次最多 10 万行，执行时长有上界（清不完留给下一次）
   # 失败分类无配置项：3xx/4xx → PERMANENT、5xx/网络错误 → RETRYABLE 是硬编码语义。
   # "某供应商用 400 表示系统忙"不做端点覆盖表（T2.1 文档 §2.3：替下游接口不规范买单，
   # 且假设同 host 语义一致）。真有不得不的原因，改 ErrorClassifier 一行代码，不走配置。

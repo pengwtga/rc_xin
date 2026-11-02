@@ -11,11 +11,23 @@ public class ApiException extends RuntimeException {
     private final HttpStatus status;
     /** 稳定错误码，写入错误体供调用方程序判定（不随文案变化）。 */
     private final String code;
+    /**
+     * 建议的重试间隔（秒），仅 503 背压使用；为 null 时不发 {@code Retry-After}。
+     *
+     * <p>放在异常上而不是让 Handler 猜：这个值来自 {@code notify.backpressure.retry-after-seconds}，
+     * 只有抛出方（{@link com.rc.notify.ingest.BackpressureGuard}）知道该让调用方等多久。
+     */
+    private final Long retryAfterSeconds;
 
     public ApiException(HttpStatus status, String code, String message) {
+        this(status, code, message, null);
+    }
+
+    public ApiException(HttpStatus status, String code, String message, Long retryAfterSeconds) {
         super(message);
         this.status = status;
         this.code = code;
+        this.retryAfterSeconds = retryAfterSeconds;
     }
 
     public static ApiException validation(String message) {
@@ -53,11 +65,28 @@ public class ApiException extends RuntimeException {
         return new ApiException(HttpStatus.CONFLICT, "CONFLICT", message);
     }
 
+    /**
+     * 队列不健康，暂时无法受理（T3.3，设计文档 §4.8）。
+     *
+     * <p>与 429 的分界线：429 是"你发太多了"（按调用方的公平性，T3.5），
+     * 503 是"系统整体接不动了"（容量问题）。前者换个调用方就好了，后者谁来都一样。
+     *
+     * <p>必须带 {@code Retry-After}：不告诉调用方等多久，他只能立刻重试——
+     * 而立刻重试正是把背压变成雪崩的方式。
+     */
+    public static ApiException overloaded(String message, long retryAfterSeconds) {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "QUEUE_OVERLOADED", message, retryAfterSeconds);
+    }
+
     public HttpStatus status() {
         return status;
     }
 
     public String code() {
         return code;
+    }
+
+    public Long retryAfterSeconds() {
+        return retryAfterSeconds;
     }
 }

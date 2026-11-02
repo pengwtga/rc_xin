@@ -1,6 +1,7 @@
 package com.rc.notify.dispatcher;
 
 import com.rc.notify.config.NotifyProperties;
+import com.rc.notify.metrics.NotifyMetrics;
 import com.rc.notify.security.SsrfGuard;
 import com.rc.notify.store.ClaimRepository;
 import com.rc.notify.store.PayloadCodec;
@@ -55,6 +56,8 @@ public class Dispatcher {
     private final SsrfGuard ssrf;
     /** 端点隔离与熔断（T2.5）：per-endpoint 并发上限 + 失败率熔断。 */
     private final EndpointGate gate;
+    /** 指标（T3.3）：投递结果 / 跳过 / 过期结果。名字与 tag 口径全在 NotifyMetrics 里。 */
+    private final NotifyMetrics metrics;
     /** 投递线程池，线程数 = workerPoolSize。 */
     private final ThreadPoolExecutor workers;
     /**
@@ -85,7 +88,7 @@ public class Dispatcher {
     /** 投递线程池：一个投递 = 一个线程，"空闲 worker 数"由 JVM 免费维护（参数定值依据 §3.5.1）。 */
     public Dispatcher(NotifyProperties props, ClaimRepository claims, HttpDeliverer deliverer, PayloadCodec codec,
                       ErrorClassifier classifier, BackoffPolicy backoff, List<DeadLetterSink> deadLetterSinks,
-                      SsrfGuard ssrf, EndpointGate gate) {
+                      SsrfGuard ssrf, EndpointGate gate, NotifyMetrics metrics) {
         this.props = props;
         this.claims = claims;
         this.deliverer = deliverer;
@@ -95,6 +98,7 @@ public class Dispatcher {
         this.deadLetterSinks = List.copyOf(deadLetterSinks);
         this.ssrf = ssrf;
         this.gate = gate;
+        this.metrics = metrics;
         this.workers = (ThreadPoolExecutor) Executors.newFixedThreadPool(
                 props.dispatcher().workerPoolSize(), new java.util.concurrent.ThreadFactory() {
                     private final AtomicInteger seq = new AtomicInteger();
@@ -145,6 +149,7 @@ public class Dispatcher {
             try {
                 int released = claims.releaseSkipped(roundToken, deferred, delayS);
                 skipped.addAndGet(released);
+                metrics.deliverySkipped("circuit_open", released);
                 log.debug("{} 条任务因端点熔断被退还（推迟 {}s，不消耗尝试预算）", released, delayS);
             } catch (Exception e) {
                 // 退还失败等于这些行停在 PROCESSING：不丢，租约过期后会被重新认领（与落库失败同一兜底）
@@ -166,7 +171,7 @@ public class Dispatcher {
         EndpointGate.Permit permit = gate.tryEnter(endpoint);
         if (permit == null) {
             boolean circuitOpen = gate.isOpen(endpoint);
-            skip(c, roundToken, gate.skipDelaySeconds(circuitOpen),
+            skip(c, roundToken, gate.skipDelaySeconds(circuitOpen), circuitOpen,
                     circuitOpen ? "端点熔断中" : "端点并发已满");
             return;
         }
@@ -204,6 +209,14 @@ public class Dispatcher {
         try {
             // 先分类、再落库：error_class 必须与晋级决策出自同一次判断，否则两者会漂移（T2.3 §2.3）
             ErrorClassifier.Decision decision = classifier.classify(outcome);
+
+            // 投递指标（T3.3）：与明细同源——都代表"这次 HTTP 真的发生过"。
+            // 跳过与过期结果不在这里，它们没有结果可比
+            metrics.deliveryAttempt(endpoint, switch (decision.type()) {
+                case SUCCESS -> "success";
+                case RETRYABLE -> "retryable";
+                case PERMANENT -> "permanent";
+            });
 
             // 端点健康度（T2.5）：只统计"可能自愈的失败"。4xx/3xx/SSRF 拒绝不计入——
             // 那是我们请求的问题，不是端点健康度；计入就等于让一个配错凭证的 caller
@@ -245,6 +258,7 @@ public class Dispatcher {
             if (!t.applied()) {
                 // 守卫失败：租约已被新 worker 接管，本结果过期。不覆盖新状态，warn 留痕。
                 // 计入累计值：单次是噪声，持续增长说明该实例的投递耗时已经逼近租约（T2.2）
+                metrics.staleResult();
                 log.warn("任务 {} 结果被守卫丢弃（租约已转移，本次为过期结果），本实例累计 {} 次",
                         c.id(), staleResults.incrementAndGet());
                 return;
@@ -264,10 +278,11 @@ public class Dispatcher {
      * <p>与失败落库的区别只在 {@code attempt_count}：都写 {@code RETRY_WAIT}，但这里把它减回去。
      * 所以"到底试过几次"只能看 {@code attempt_count}，不能看状态。
      */
-    private void skip(ClaimRepository.Claimed c, String roundToken, long delayS, String why) {
+    private void skip(ClaimRepository.Claimed c, String roundToken, long delayS, boolean circuitOpen, String why) {
         try {
             if (claims.releaseSkipped(roundToken, List.of(c.id()), delayS) == 1) {
                 skipped.incrementAndGet();
+                metrics.deliverySkipped(circuitOpen ? "circuit_open" : "permit_full");
                 log.debug("任务 {} 被跳过（{}），推迟 {}s 后再试，不消耗尝试预算", c.id(), why, delayS);
             } else {
                 // 守卫失败：租约已转移（本实例被判死过）。与状态落库同一条规矩——不碰别人的行

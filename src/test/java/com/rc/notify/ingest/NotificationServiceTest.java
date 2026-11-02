@@ -7,9 +7,11 @@ import com.rc.notify.config.CryptoProperties;
 import com.rc.notify.config.NotifyProperties;
 import com.rc.notify.config.SsrfProperties;
 import com.rc.notify.ingest.dto.SubmitNotificationRequest;
+import com.rc.notify.metrics.NotifyMetrics;
 import com.rc.notify.security.SsrfGuard;
 import com.rc.notify.store.AesGcmPayloadCodec;
 import com.rc.notify.store.NotificationRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -46,11 +48,14 @@ class NotificationServiceTest {
                 new NotifyProperties.Http(3_000, 15_000),
                 new NotifyProperties.Backoff(10_000, 3_600_000, 0.5),
                 new NotifyProperties.Retry(10),
-                new NotifyProperties.Backpressure(100_000, 30));
+                new NotifyProperties.Backpressure(100_000, 30, 30));
         service = new NotificationService(repository,
                 new AesGcmPayloadCodec(new CryptoProperties(DEV_KEY)),
                 props,
-                new SsrfGuard(new SsrfProperties(List.of(), true)));
+                new SsrfGuard(new SsrfProperties(List.of(), true)),
+                // 背压在本类里始终放行：这里测的是业务校验，不是队列健康度（见 BackpressureGuardTest）
+                new BackpressureGuard(() -> null, props, new NotifyMetrics(new SimpleMeterRegistry())),
+                new NotifyMetrics(new SimpleMeterRegistry()));
     }
 
     private SubmitNotificationRequest req(String url, String method, Map<String, String> headers, String body) {

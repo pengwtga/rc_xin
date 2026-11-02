@@ -67,6 +67,9 @@ public record NotifyProperties(
             /** 待投递积压上限（条）：100000，≈10 分钟消化量，超过即拒绝新请求。 */
             int maxPending,
             /** 最老待投递任务年龄上限（分钟）：30，超龄说明队列已经不健康，直接拒绝。 */
-            int maxOldestAgeMinutes
+            int maxOldestAgeMinutes,
+            /** 拒绝时给的 Retry-After（秒）：30 —— 短了等于没背压（调用方立刻回来），
+             *  长了让业务回调整体推迟。取 30s ≈ 队列消化 10% 的时间，够引擎缓一口气。 */
+            long retryAfterSeconds
     ) {}
 }

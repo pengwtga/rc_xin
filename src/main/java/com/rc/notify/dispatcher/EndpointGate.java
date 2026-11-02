@@ -175,6 +175,27 @@ public class EndpointGate {
         return openEvents.get();
     }
 
+    /**
+     * 当前处于 OPEN 的端点数（T3.3 指标 {@code notify_circuit_open_endpoints}）。
+     *
+     * <p>抓取时遍历跟踪表，每个端点取一次锁。代价是微秒级 × 端点数，而抓取频率是 15s 一次，
+     * 不会和投递线程抢锁。刻意<b>不做</b> per-endpoint 的 gauge：那意味着每个端点一个 meter，
+     * 而端点值来自调用方填的 URL——又一个无界基数（同一问题的另一面见 {@code MetricsConfig}）。
+     */
+    public int openCount() {
+        if (!cfg.enabled()) {
+            return 0;
+        }
+        long now = clock.getAsLong();
+        int open = 0;
+        for (Endpoint e : endpoints.values()) {
+            if (e.isOpen(now)) {
+                open++;
+            }
+        }
+        return open;
+    }
+
     /** 跟踪中的端点数（运维观察与测试用）。 */
     public int trackedEndpoints() {
         return endpoints.size();

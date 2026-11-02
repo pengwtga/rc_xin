@@ -3,6 +3,7 @@ package com.rc.notify.ingest;
 import com.rc.notify.config.AuthProperties;
 import com.rc.notify.config.NotifyProperties;
 import com.rc.notify.ingest.dto.SubmitNotificationResponse;
+import com.rc.notify.metrics.NotifyMetrics;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -45,6 +46,13 @@ class IngestControllerTest {
     @MockBean
     private NotificationService service;
 
+    /**
+     * 切片测试会连带加载 {@link IngestMetricsFilter}（@WebMvcTest 包含 Filter 类型），
+     * 它依赖 NotifyMetrics —— 这里给一个 mock，避免为了一个计数器把整个 metrics 自动配置拖进来。
+     */
+    @MockBean
+    private NotifyMetrics metrics;
+
     /** 切片测试不加载主应用，这里补上 Service 需要的 NotifyProperties。 */
     @TestConfiguration
     static class PropsConfig {
@@ -55,7 +63,7 @@ class IngestControllerTest {
                     new NotifyProperties.Http(3_000, 15_000),
                     new NotifyProperties.Backoff(10_000, 3_600_000, 0.5),
                     new NotifyProperties.Retry(10),
-                    new NotifyProperties.Backpressure(100_000, 30));
+                    new NotifyProperties.Backpressure(100_000, 30, 30));
         }
     }
 

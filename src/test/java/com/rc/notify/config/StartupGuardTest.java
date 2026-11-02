@@ -18,7 +18,7 @@ class StartupGuardTest {
                 new NotifyProperties.Http(3_000, 15_000),
                 new NotifyProperties.Backoff(10_000, 3_600_000, 0.5),
                 new NotifyProperties.Retry(10),
-                new NotifyProperties.Backpressure(100_000, 30)
+                new NotifyProperties.Backpressure(100_000, 30, 30)
         );
     }
 

@@ -5,6 +5,7 @@ import com.rc.notify.config.AuthProperties;
 import com.rc.notify.config.NotifyProperties;
 import com.rc.notify.ingest.dto.SubmitNotificationRequest;
 import com.rc.notify.ingest.dto.SubmitNotificationResponse;
+import com.rc.notify.metrics.NotifyMetrics;
 import com.rc.notify.security.SsrfGuard;
 import com.rc.notify.store.NotificationRepository;
 import com.rc.notify.store.PayloadCodec;
@@ -39,16 +40,26 @@ public class NotificationService {
     private final NotifyProperties props;
     /** 出站目标校验（T2.4）：受理期只做不碰网络的判定，投递期才是真正的防线。 */
     private final SsrfGuard ssrf;
+    /** 背压（T3.3）：队列不健康时在受理前就拒绝，不做后续任何无用功。 */
+    private final BackpressureGuard backpressure;
+    /** 指标（T3.3）：只用于"幂等命中"这类 HTTP 状态码表达不出来的事实。 */
+    private final NotifyMetrics metrics;
 
     public NotificationService(NotificationRepository repository, PayloadCodec codec, NotifyProperties props,
-                               SsrfGuard ssrf) {
+                               SsrfGuard ssrf, BackpressureGuard backpressure, NotifyMetrics metrics) {
         this.repository = repository;
         this.codec = codec;
         this.props = props;
         this.ssrf = ssrf;
+        this.backpressure = backpressure;
+        this.metrics = metrics;
     }
 
     public SubmitNotificationResponse submit(SubmitNotificationRequest req, AuthProperties.Client caller) {
+        // 背压放在最前面（T3.3）：过载时连 URL 校验和 AES 加密都不该做——
+        // 那些 CPU 花在一个注定被拒绝的请求上，只会让本来就慢的系统更慢
+        backpressure.ensureCapacity();
+
         String targetUrl = validateTargetUrl(req.targetUrl());
         String method = validateMethod(req.httpMethod());
         validateHeaders(req.headers());
@@ -76,6 +87,7 @@ public class NotificationService {
             // 幂等命中（T1.3）：调用方超时重试是正常路径，不是错误路径——返回 202 + 原单，
             // 让重试与首次提交在调用方看来完全一致（T1.3 文档 §2.2）。
             // 唯一键冲突时原单必然已提交（InnoDB 插入会等待未提交的冲突键），回查不应读空。
+            metrics.idempotentHit(caller.callerId());
             return repository.findExisting(caller.callerId(), idempotencyKey)
                     .map(existing -> new SubmitNotificationResponse(existing.id(), existing.status()))
                     .orElseThrow(() -> new IllegalStateException(

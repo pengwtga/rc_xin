@@ -25,9 +25,10 @@ curl -s http://localhost:8080/actuator/health   # -> {"status":"UP"}
 - [x] **M0** 骨架可启动、可迁移、可测试（T0.1 结构 / T0.2 建表 / T0.3 启动自检）
 - [x] **M1** 能存能投（T1.1 接入接口 / T1.2 投递引擎 / T1.3 幂等去重）
 - [x] **M2** 可靠投递（T2.1 失败分级 / T2.2 租约恢复 / T2.3 死信终态 / T2.4 出站安全 / T2.5 端点隔离与熔断）
-- [ ] M3 可观测与运维（查询 / 重放 / 指标 / 背压 / 归档）
+- [x] **M3** 可观测与运维（查询 / 重放 / 指标 / 背压 / 归档）
   - [x] T3.1 查询接口：`GET /v1/notifications/{id}`（Header 脱敏 + 逐次明细）、`GET /v1/notifications?status=&cursor=`（键集分页）
   - [x] T3.2 人工重放：`POST /v1/notifications/{id}/replay`（仅 DEAD、attempt_count 不归零、预算追加一档、审计同事务落库）
+  - [x] T3.3 指标 / 背压 / 归档：`/actuator/prometheus` 12 个指标、积压超阈值 `503 + Retry-After`、成功 24h / 失败 7d 清密文（不删行）
 - [ ] M4 交付（压测 / README / AI 会话记录）
 
 ## 故障演示
@@ -51,12 +52,15 @@ bash scripts/query_demo.sh
 # 人工重放：DEAD 单回队列、attempt_count 不归零、预算追加一档、重复点击 409（约 15s）
 bash scripts/replay_demo.sh
 
+# 指标 / 背压 / 归档：抓 5 个核心指标、积压超阈值 503 + Retry-After、清密文但保留行（约 25s）
+bash scripts/observability_demo.sh
+
 # 慢/坏下游，供手工验收
 python3 scripts/mock_downstream.py --port 9001 --sleep 20   # 触发 15s 超时
 python3 scripts/mock_downstream.py --port 9001 --status 500 # 触发可重试失败
 ```
 
-原理与取舍见 `docs/T2.2-租约与崩溃恢复.md`、`docs/T2.3-死信终态与尝试预算.md`、`docs/T2.4-出站安全与凭证加密.md`、`docs/T2.5-端点隔离与熔断.md`、`docs/T3.1-查询接口与逐次明细.md`、`docs/T3.2-人工重放.md`。
+原理与取舍见 `docs/T2.2-租约与崩溃恢复.md`、`docs/T2.3-死信终态与尝试预算.md`、`docs/T2.4-出站安全与凭证加密.md`、`docs/T2.5-端点隔离与熔断.md`、`docs/T3.1-查询接口与逐次明细.md`、`docs/T3.2-人工重放.md`、`docs/T3.3-指标背压与归档.md`。
 
 ## 查询接口（T3.1）
 
@@ -71,6 +75,24 @@ curl -s 'http://localhost:8080/v1/notifications?status=DEAD&limit=20' -H 'X-Api-
 curl -s -X POST 'http://localhost:8080/v1/notifications/1/replay' \
   -H 'Content-Type: application/json' -H 'X-Api-Key: k_shop' \
   -d '{"operator":"zhang.san","reason":"供应商已恢复，重新投递"}'
+```
+
+## 监控
+
+```bash
+# 12 个 notify_* 指标：受理 QPS/错误率、幂等命中、队列深度、队头逾期秒数、投递结果（按端点）、
+# 跳过、过期结果、死信、熔断端点数、归档清理量
+curl -s http://localhost:8080/actuator/prometheus | grep '^notify_'
+
+# 队列不健康时新提交返回 503 + Retry-After，且不落库（只挡提交，查询与重放照常）
+curl -s -i -X POST http://localhost:8080/v1/notifications -H 'X-Api-Key: k_shop' -d '{}'
+```
+
+成功率由原始计数算出，不额外存 Gauge：
+
+```promql
+sum(rate(notify_delivery_attempts_total{result="success"}[5m]))
+  / sum(rate(notify_delivery_attempts_total[5m]))
 ```
 
 ## 配置
