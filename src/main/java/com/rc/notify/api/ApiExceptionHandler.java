@@ -9,6 +9,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.util.stream.Collectors;
 
@@ -41,6 +42,28 @@ public class ApiExceptionHandler {
     public ResponseEntity<ApiError> handleUnreadable(HttpMessageNotReadableException e) {
         return ResponseEntity.unprocessableEntity()
                 .body(new ApiError("VALIDATION_FAILED", "请求体不是合法 JSON"));
+    }
+
+    /**
+     * 类型转换失败（T3.1 补的坑）。
+     *
+     * <p>{@code GET /v1/notifications/abc} 的 `{id}` 绑不进 `long`，Spring 抛
+     * {@link MethodArgumentTypeMismatchException}。它默认落到下面的 {@code Exception} 兜底里，
+     * 于是调用方看到的是 **500 服务内部错误** —— 一个纯客户端错误被打成服务端故障，
+     * 既误导排查（告警会响），也让"参数写错"和"我们的 bug"混在一起。
+     *
+     * <p>这里回显参数名与出错的值（截断到 64 字符）：参数问题要让人一眼看到自己传了什么，
+     * 但不把可能长达数 KB 的原始值原样吐回去。
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiError> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
+        String raw = String.valueOf(e.getValue());
+        if (raw.length() > 64) {
+            raw = raw.substring(0, 64) + "…";
+        }
+        return ResponseEntity.badRequest().body(new ApiError("INVALID_PARAMETER",
+                "参数 %s 格式非法: %s（期望 %s）".formatted(
+                        e.getName(), raw, e.getRequiredType() == null ? "?" : e.getRequiredType().getSimpleName())));
     }
 
     @ExceptionHandler(Exception.class)
