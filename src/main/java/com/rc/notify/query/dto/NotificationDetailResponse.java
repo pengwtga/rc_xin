@@ -47,5 +47,7 @@ public record NotificationDetailResponse(
         /** Header 能否解密：密钥轮换后查老单会变 false，此时其余字段照常可用。 */
         boolean headersDecodable,
         /** 逐次尝试，按 attemptNo 升序；超过上限时保留<b>最近</b>的 N 条。 */
-        List<AttemptView> attempts
+        List<AttemptView> attempts,
+        /** 人工重放历史，按时间正序；补上 DEAD → PENDING 这类没有 attempt 明细的状态跳变（T3.2）。 */
+        List<ReplayView> replays
 ) {}

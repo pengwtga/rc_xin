@@ -6,8 +6,10 @@ import com.rc.notify.query.dto.MaskedHeader;
 import com.rc.notify.query.dto.NotificationDetailResponse;
 import com.rc.notify.query.dto.NotificationPage;
 import com.rc.notify.query.dto.NotificationSummary;
+import com.rc.notify.query.dto.ReplayView;
 import com.rc.notify.store.NotificationReadRepository;
 import com.rc.notify.store.PayloadCodec;
+import com.rc.notify.store.ReplayRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -44,12 +46,14 @@ public class NotificationQueryService {
     private final NotificationReadRepository readRepo;
     private final PayloadCodec codec;
     private final HeaderMasker masker;
+    private final ReplayRepository replayRepo;
 
     public NotificationQueryService(NotificationReadRepository readRepo, PayloadCodec codec,
-                                    HeaderMasker masker) {
+                                    HeaderMasker masker, ReplayRepository replayRepo) {
         this.readRepo = readRepo;
         this.codec = codec;
         this.masker = masker;
+        this.replayRepo = replayRepo;
     }
 
     /**
@@ -68,12 +72,18 @@ public class NotificationQueryService {
 
         HeaderView headers = decodeHeaders(id, row.headersEnc());
 
+        List<ReplayView> replays = replayRepo.findReplays(id).stream()
+                .map(r -> new ReplayView(r.operator(), r.reason(),
+                        r.attemptCountBefore(), r.maxAttemptsAfter(), r.createdAt()))
+                .toList();
+
         return new NotificationDetailResponse(
                 row.id(), row.status(), row.idempotencyKey(), row.targetUrl(), row.httpMethod(),
                 row.attemptCount(), row.maxAttempts(), row.nextAttemptAt(),
                 row.lastStatusCode(), row.lastErrorClass(), row.createdAt(), row.updatedAt(),
                 row.hasBody(), headers.masked(), headers.decodable(),
-                attempts.stream().map(NotificationQueryService::toView).toList());
+                attempts.stream().map(NotificationQueryService::toView).toList(),
+                replays);
     }
 
     /**

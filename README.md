@@ -27,6 +27,7 @@ curl -s http://localhost:8080/actuator/health   # -> {"status":"UP"}
 - [x] **M2** 可靠投递（T2.1 失败分级 / T2.2 租约恢复 / T2.3 死信终态 / T2.4 出站安全 / T2.5 端点隔离与熔断）
 - [ ] M3 可观测与运维（查询 / 重放 / 指标 / 背压 / 归档）
   - [x] T3.1 查询接口：`GET /v1/notifications/{id}`（Header 脱敏 + 逐次明细）、`GET /v1/notifications?status=&cursor=`（键集分页）
+  - [x] T3.2 人工重放：`POST /v1/notifications/{id}/replay`（仅 DEAD、attempt_count 不归零、预算追加一档、审计同事务落库）
 - [ ] M4 交付（压测 / README / AI 会话记录）
 
 ## 故障演示
@@ -47,12 +48,15 @@ bash scripts/circuit_breaker_demo.sh
 # 查询接口：查单看逐次明细（Header 脱敏、body 不回显）、列表拉死信、越权 404（约 15s）
 bash scripts/query_demo.sh
 
+# 人工重放：DEAD 单回队列、attempt_count 不归零、预算追加一档、重复点击 409（约 15s）
+bash scripts/replay_demo.sh
+
 # 慢/坏下游，供手工验收
 python3 scripts/mock_downstream.py --port 9001 --sleep 20   # 触发 15s 超时
 python3 scripts/mock_downstream.py --port 9001 --status 500 # 触发可重试失败
 ```
 
-原理与取舍见 `docs/T2.2-租约与崩溃恢复.md`、`docs/T2.3-死信终态与尝试预算.md`、`docs/T2.4-出站安全与凭证加密.md`、`docs/T2.5-端点隔离与熔断.md`、`docs/T3.1-查询接口与逐次明细.md`。
+原理与取舍见 `docs/T2.2-租约与崩溃恢复.md`、`docs/T2.3-死信终态与尝试预算.md`、`docs/T2.4-出站安全与凭证加密.md`、`docs/T2.5-端点隔离与熔断.md`、`docs/T3.1-查询接口与逐次明细.md`、`docs/T3.2-人工重放.md`。
 
 ## 查询接口（T3.1）
 
@@ -62,6 +66,11 @@ curl -s 'http://localhost:8080/v1/notifications/1' -H 'X-Api-Key: k_shop' | pyth
 
 # 死信清单：键集分页，next_cursor 为 null 即到底
 curl -s 'http://localhost:8080/v1/notifications?status=DEAD&limit=20' -H 'X-Api-Key: k_shop'
+
+# 人工重放（reason 必填）：仅 DEAD 可重放，attempt_count 不归零、预算追加一档
+curl -s -X POST 'http://localhost:8080/v1/notifications/1/replay' \
+  -H 'Content-Type: application/json' -H 'X-Api-Key: k_shop' \
+  -d '{"operator":"zhang.san","reason":"供应商已恢复，重新投递"}'
 ```
 
 ## 配置

@@ -42,6 +42,17 @@ public class ApiException extends RuntimeException {
         return new ApiException(HttpStatus.BAD_REQUEST, "INVALID_PARAMETER", message);
     }
 
+    /**
+     * 当前状态不允许该操作（T3.2）。
+     *
+     * <p>只用于"资源存在、也属于你，但状态不对"：对 PENDING/SUCCEEDED 单重放。
+     * 与 404 严格区分——404 是"不是你的或不存在"，409 是"是你的，但它现在不在 DEAD"，
+     * 调用方（运维脚本）需要靠这个码判断"该刷新列表再选一条"，而不是"别碰别人的单"。
+     */
+    public static ApiException conflict(String message) {
+        return new ApiException(HttpStatus.CONFLICT, "CONFLICT", message);
+    }
+
     public HttpStatus status() {
         return status;
     }

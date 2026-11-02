@@ -164,7 +164,8 @@ public class NotificationReadRepository {
      * 这类错误在跨时区部署时才暴露，所以这里统一补上 {@code Z} 而不是返回裸 LocalDateTime，
      * 让客户端不可能误读。
      */
-    private static OffsetDateTime utc(ResultSet rs, String column) throws SQLException {
+    // 包内共享：ReplayRepository 的审计时间走同一套转换，两处各写一份必然漂移
+    static OffsetDateTime utc(ResultSet rs, String column) throws SQLException {
         Timestamp ts = rs.getTimestamp(column);
         return ts == null ? null : ts.toInstant().atOffset(ZoneOffset.UTC);
     }
