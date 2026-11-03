@@ -8,7 +8,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 /**
  * API 通知系统 —— 可靠出站 HTTP 投递服务。
  *
- * <p>设计文档：API通知系统_设计文档_V2.md
+ * <p>设计文档：docs/API通知系统_设计文档.md
  * <p>核心三件事：请求先落盘（不丢）、投递有租约（不卡死）、失败有分级（不白重试）。
  */
 @SpringBootApplication
