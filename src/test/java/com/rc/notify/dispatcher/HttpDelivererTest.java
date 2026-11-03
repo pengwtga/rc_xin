@@ -39,6 +39,9 @@ class HttpDelivererTest {
             byte[] reqBody = exchange.getRequestBody().readAllBytes();
             received.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath()
                     + " auth=" + exchange.getRequestHeaders().getFirst("Authorization")
+                    + " nid=" + exchange.getRequestHeaders().getFirst("X-Notification-Id")
+                    + " idem=" + exchange.getRequestHeaders().getFirst("X-Idempotency-Key")
+                    + " nidAll=" + exchange.getRequestHeaders().get("X-Notification-Id")
                     + " body=" + new String(reqBody));
             byte[] resp = "{\"ok\":true}".getBytes();
             exchange.sendResponseHeaders(200, resp.length);
@@ -135,6 +138,33 @@ class HttpDelivererTest {
         HttpDeliverer.Outcome o = d.deliver(new HttpDeliverer.Target(
                 "POST", "::not-a-url::", Map.of(), null));
         assertThat(o.errorClass()).isEqualTo("IO");
+    }
+
+    @Test
+    void 身份头注入_调用方同名头被取代且只有一个值() {
+        HttpDeliverer d = new HttpDeliverer(props(15_000));
+        HttpDeliverer.Outcome o = d.deliver(new HttpDeliverer.Target(
+                "POST", "http://127.0.0.1:" + server.getAddress().getPort() + "/cb",
+                // 调用方自带 X-Notification-Id：必须被取代，而不是拼出两个值让下游无法去重
+                Map.of("X-Notification-Id", "caller-forged", "X-Idempotency-Key", "caller-key"),
+                "{\"x\":1}".getBytes(),
+                42L, "order_paid:pay_001"));
+
+        assertThat(o.isSuccess()).isTrue();
+        assertThat(received).hasSize(1);
+        String r = received.get(0);
+        assertThat(r).contains("nid=42", "idem=order_paid:pay_001");
+        assertThat(r).as("调用方伪造的同名头不得残留").doesNotContain("caller-forged");
+        assertThat(r).as("每个身份头只有一个值（getFirst 与整个 list 一致）")
+                .contains("nidAll=[42]");
+    }
+
+    @Test
+    void 无身份场景不注入身份头() {
+        HttpDeliverer d = new HttpDeliverer(props(15_000));
+        d.deliver(new HttpDeliverer.Target(
+                "POST", "http://127.0.0.1:" + server.getAddress().getPort() + "/cb", Map.of(), null));
+        assertThat(received.get(0)).contains("nid=null", "idem=null", "nidAll=null");
     }
 
     @Test

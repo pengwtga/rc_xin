@@ -130,6 +130,11 @@ curl -s -X POST http://localhost:8080/v1/notifications \
     "body": "{\"order_id\":\"o_1\"}"
   }'
 
+# 投递时我方额外注入两个身份头，供下游去重（at-least-once 语义下必然会有重复投递）：
+#   X-Notification-Id: <单号>        我方唯一标识，重复投递时两次相同
+#   X-Idempotency-Key: <调用方幂等键>  即上例的 idempotency_key
+# 调用方若在 headers 里自带同名头，会被我方值取代（不会出现两个值）
+
 # 单号详情：状态 + 每轮 attempt（状态码/耗时/错误分类/响应片段）；Header 只回显白名单，body 只回答有无
 curl -s 'http://localhost:8080/v1/notifications/1' -H 'X-Api-Key: k_shop'
 
@@ -145,7 +150,7 @@ curl -s -X POST 'http://localhost:8080/v1/notifications/1/replay' \
 ## 监控
 
 ```bash
-# 14 个 notify_* 指标：受理 QPS/错误率、幂等命中、背压拒绝、队列深度/在途/死信、队头逾期秒数、
+# 15 个 notify_* 指标：受理 QPS/错误率、幂等命中、背压拒绝、队列深度/在途/死信、队头逾期秒数、
 # 投递结果（按端点）、跳过、过期结果、死信、熔断端点数、归档清理量、worker 占用
 curl -s http://localhost:8080/actuator/prometheus | grep '^notify_'
 ```

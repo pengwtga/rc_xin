@@ -51,7 +51,7 @@ public class ClaimRepository {
 
     /** 回读：轮次 token 保证只命中本轮认领的行，不会捞到上一轮仍在途的任务（T1.2 文档 §2.2）。 */
     private static final String CLAIM_SELECT = """
-            SELECT id, caller_id, target_url, http_method, headers_enc, body_enc, attempt_count, max_attempts
+            SELECT id, caller_id, idempotency_key, target_url, http_method, headers_enc, body_enc, attempt_count, max_attempts
             FROM notification
             WHERE lease_owner = ? AND status = 'PROCESSING'
             """;
@@ -134,6 +134,7 @@ public class ClaimRepository {
         return jdbc.query(CLAIM_SELECT, (rs, i) -> new Claimed(
                         rs.getLong("id"),
                         rs.getString("caller_id"),
+                        rs.getString("idempotency_key"),
                         rs.getString("target_url"),
                         rs.getString("http_method"),
                         rs.getBytes("headers_enc"),
@@ -228,6 +229,8 @@ public class ClaimRepository {
             long id,
             /** 调用方标识；本层只用于日志与排障，不参与投递。 */
             String callerId,
+            /** 调用方幂等键；随 {@code X-Idempotency-Key} 注入投递请求，供下游去重（§2.3）。 */
+            String idempotencyKey,
             /** 目标地址（接入时已做协议与结构校验）。 */
             String targetUrl,
             /** 大写 HTTP 方法（接入时已过白名单）。 */

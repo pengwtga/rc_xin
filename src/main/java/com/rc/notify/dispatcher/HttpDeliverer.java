@@ -29,6 +29,10 @@ import java.util.Map;
  *   <li>响应只读前 2048 字节作为排查片段：无界读 body 会让一个失控的对端拖住 worker。</li>
  * </ul>
  *
+ * <p>身份头注入（下游去重契约，§2.3）：每次投递强制携带 {@code X-Notification-Id}（我方单号）
+ * 与 {@code X-Idempotency-Key}（调用方幂等键），调用方自带同名头会被我方值取代——
+ * at-least-once 语义下下游必须能识别重复，这个能力不能寄希望于调用方记得传。
+ *
  * <p>本类**不抛异常**：网络层失败一律折叠为 errorClass（TIMEOUT/DNS/TLS/CONN_REFUSED/IO），
  * 分类到重试策略的翻译由上层（T2.1 ErrorClassifier）负责。
  */
@@ -79,11 +83,21 @@ public class HttpDeliverer {
             String method,
             /** 目标地址，须为 http/https 且带 host。 */
             String url,
-            /** 需透传的 Header；host/content-length/connection 会被投递器跳过。 */
+            /** 需透传的 Header；host/content-length/connection/我方注入的两个身份头会被投递器跳过。 */
             Map<String, String> headers,
             /** 请求体字节；null 表示无体请求。 */
-            byte[] body
-    ) {}
+            byte[] body,
+            /** 我方单号（notification.id），随 {@code X-Notification-Id} 注入；0 表示不注入（仅测试用）。 */
+            long notificationId,
+            /** 调用方幂等键，随 {@code X-Idempotency-Key} 注入；null/空白表示不注入。 */
+            String idempotencyKey
+    ) {
+
+        /** 测试与无身份场景的便捷构造：不注入身份头。 */
+        public Target(String method, String url, Map<String, String> headers, byte[] body) {
+            this(method, url, headers, body, 0, null);
+        }
+    }
 
     /**
      * 执行投递。任何网络层异常折叠为 Outcome（errorClass 非空）；程序性错误（URI 非法等）同样折叠，
@@ -95,6 +109,14 @@ public class HttpDeliverer {
             HttpRequest.Builder rb = HttpRequest.newBuilder(URI.create(t.url()))
                     .timeout(Duration.ofMillis(totalTimeoutMs))
                     .header("User-Agent", "rc-notify/0.1");
+            // 身份头（T5：下游去重契约）在我方手里，先注入；调用方同名头随后被跳过，
+            // 保证线上每个身份头只有一个值——下游按它去重，出现两个值等于没有去重
+            if (t.notificationId() > 0) {
+                rb.header("X-Notification-Id", Long.toString(t.notificationId()));
+            }
+            if (t.idempotencyKey() != null && !t.idempotencyKey().isBlank()) {
+                rb.header("X-Idempotency-Key", t.idempotencyKey());
+            }
             t.headers().forEach((k, v) -> {
                 if (!isRestrictedHeader(k)) {
                     rb.header(k, v);
@@ -129,10 +151,14 @@ public class HttpDeliverer {
         }
     }
 
-    /** HttpClient 禁改的安全敏感头（JDK 会抛 IllegalArgumentException，这里显式跳过并保持行为可预期）。 */
+    /**
+     * HttpClient 禁改的安全敏感头（JDK 会抛 IllegalArgumentException，这里显式跳过并保持行为可预期），
+     * 加上我方注入的两个身份头——调用方若自带，会被我方值取代而不是拼成两个值。
+     */
     private static boolean isRestrictedHeader(String name) {
         String n = name.toLowerCase();
-        return n.equals("host") || n.equals("content-length") || n.equals("connection");
+        return n.equals("host") || n.equals("content-length") || n.equals("connection")
+                || n.equals("x-notification-id") || n.equals("x-idempotency-key");
     }
 
     private static Outcome fail(long startNanos, String errorClass) {

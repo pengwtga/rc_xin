@@ -199,7 +199,8 @@ public class Dispatcher {
                 Map<String, String> headers = codec.decodeHeaders(c.headersEnc());
                 String body = codec.decodeBody(c.bodyEnc());
                 outcome = deliverer.deliver(new HttpDeliverer.Target(
-                        c.httpMethod(), c.targetUrl(), headers, body == null ? null : body.getBytes()));
+                        c.httpMethod(), c.targetUrl(), headers, body == null ? null : body.getBytes(),
+                        c.id(), c.idempotencyKey()));
             }
         } catch (Exception e) {
             log.warn("任务 {} 投递前处理异常，按 IO 失败兜底: {}", c.id(), e.toString());
