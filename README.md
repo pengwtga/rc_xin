@@ -194,4 +194,4 @@ export NOTIFY_SSRF_ALLOWED_HOSTS=                     # 空 = 禁止任何内网
 | `docs/T3.2-人工重放.md` | 守卫写在 WHERE、预算追加一档、审计同事务 |
 | `docs/T3.3-指标背压与归档.md` | 抓取不查库、按年龄而非创建时间、只清载荷不删行 |
 | `docs/T4-交付.md` | Testcontainers 决策、压测方法与三个发现、Demo 剧本、已知边界 |
-| `docs/ai-session.zip` | AI 建议 → 我的判断 → 最终决定（8 条链 + 未采纳清单 + 原始提问） |
+| `docs/ai-session.zip` | 两版完整对话记录（v1 8 轮 / v2 34 轮），提问原文 + 每轮结论；同内容见 `docs/ai-session/` |

@@ -114,7 +114,7 @@ curl -sS localhost:8080/v1/notifications/1 -H 'X-Api-Key: k_shop'
 | T4.1 | 单元 + 集成测试           | 集成测试跑在 Testcontainers MySQL 上，**手动触发 `pollOnce()`**；覆盖 §9.2 的 7 个用例 | `mvn verify` 全绿且不依赖本机 MySQL；无测试因后台调度误投真实地址                            | M2   | 5h   | §9.2 |
 | T4.2 | 压测与实测数据回填           | 用固定 QPS 灌入（建议 `wrk`/`k6` 打接入接口）→ 记录受理 p99、DB 写入速率、worker 利用率 | 实测受理 p99 < 50ms（§9.1）；把实测值与 §7 的估算对比表写入 README，偏差 >3 倍则说明重估结论      | M3   | 3h   | §7 §9.1 |
 | T4.3 | README + 5 分钟 Demo 脚本 | README（3 条命令启动 + 架构图 + 边界声明 + 取舍摘要 + 实测数据）、`scripts/demo.sh` | 干净机器 `docker compose up` → 按 README 走完 demo 脚本，全程无手工改配置；README 首屏能回答"边界/语义/不采纳"三问 | M3   | 3h   | §0 §2 §6 |
-| T4.4 | AI 会话记录归档            | `docs/ai-session.zip`（含关键提问、被否决的 AI 建议及否决理由）                      | zip 内至少 3 处体现"AI 建议 → 我的判断 → 最终决定"的完整链条                          | —    | 1h   | 作业提交项 |
+| T4.4 | AI 会话记录归档            | `docs/ai-session.zip`（v1/v2 对话记录原文：提问照录 + 每轮结论）                      | zip 内至少 3 处能追到"AI 建议 → 我的判断 → 最终决定"的完整链条                          | —    | 1h   | 作业提交项 |
 
 ---
 
