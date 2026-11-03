@@ -1,9 +1,9 @@
 package com.rc.notify.archive;
 
 import com.rc.notify.store.PayloadCodec;
+import com.rc.notify.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -29,11 +29,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(properties = {
         "notify.dispatcher.scheduler-enabled=false",
-        "notify.archive.enabled=false",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+        "notify.archive.enabled=false"
 })
-@EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
-class ArchiveIntegrationTest {
+class ArchiveIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     private ArchiveService service;

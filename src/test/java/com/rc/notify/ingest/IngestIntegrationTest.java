@@ -1,8 +1,8 @@
 package com.rc.notify.ingest;
 
+import com.rc.notify.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -25,12 +25,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * <p>调度器置 false（§9.2 用例 7）：防止后台线程把测试数据当真实流量投出去。
  */
 @SpringBootTest(properties = {
-        "notify.dispatcher.scheduler-enabled=false",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+        "notify.dispatcher.scheduler-enabled=false"
 })
 @AutoConfigureMockMvc
-@EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
-class IngestIntegrationTest {
+class IngestIntegrationTest extends AbstractIntegrationTest {
 
     private static final String VALID_BODY = """
             {"idempotency_key":"order_paid:pay_it_001","target_url":"https://crm.example.com/cb",

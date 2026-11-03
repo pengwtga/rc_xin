@@ -3,10 +3,10 @@ package com.rc.notify.replay;
 import com.jayway.jsonpath.JsonPath;
 import com.rc.notify.dispatcher.Dispatcher;
 import com.rc.notify.ingest.ApiKeyAuthFilter;
+import com.rc.notify.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -42,12 +42,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @SpringBootTest(properties = {
         "notify.dispatcher.scheduler-enabled=false",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
         "notify.ssrf.allowed-hosts=127.0.0.1"
 })
 @AutoConfigureMockMvc
-@EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
-class ReplayIntegrationTest {
+class ReplayIntegrationTest extends AbstractIntegrationTest {
 
     private static final String KEY_SHOP = "k_shop";        // -> shop，预算档位 10（全局默认）
     private static final String KEY_INVENTORY = "k_inventory"; // -> inventory，预算档位 6（调用方覆盖）

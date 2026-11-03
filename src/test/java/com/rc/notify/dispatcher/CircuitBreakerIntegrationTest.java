@@ -1,10 +1,10 @@
 package com.rc.notify.dispatcher;
 
 import com.rc.notify.store.PayloadCodec;
+import com.rc.notify.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -36,7 +36,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(properties = {
         "notify.dispatcher.scheduler-enabled=false",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
         "notify.ssrf.allowed-hosts=127.0.0.1",
         // 小池子 + 小样本：让 4 个失败就能把端点打熔断，测试不必等 60s 或灌 100 条
         "notify.dispatcher.worker-pool-size=4",
@@ -51,8 +50,7 @@ import static org.assertj.core.api.Assertions.assertThat;
         "notify.backoff.base-ms=1000",
         "notify.backoff.cap-ms=2000"
 })
-@EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
-class CircuitBreakerIntegrationTest {
+class CircuitBreakerIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     private Dispatcher dispatcher;

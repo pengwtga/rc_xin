@@ -1,10 +1,10 @@
 package com.rc.notify.dispatcher;
 
 import com.rc.notify.store.ClaimRepository;
+import com.rc.notify.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -35,12 +35,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(properties = {
         "notify.dispatcher.scheduler-enabled=false",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
         // T2.4：投递期会拦回环/私有地址，测试打的是 127.0.0.1，必须显式放行
         "notify.ssrf.allowed-hosts=127.0.0.1"
 })
-@EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
-class LeaseRecoveryIntegrationTest {
+class LeaseRecoveryIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     private Dispatcher dispatcher;

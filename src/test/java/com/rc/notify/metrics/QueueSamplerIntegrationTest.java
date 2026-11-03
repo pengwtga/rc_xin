@@ -1,8 +1,8 @@
 package com.rc.notify.metrics;
 
+import com.rc.notify.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -16,11 +16,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * backlog 该不该算 PROCESSING、oldestOverdue 该不该算未来的任务——每一条都在下面钉住。
  */
 @SpringBootTest(properties = {
-        "notify.dispatcher.scheduler-enabled=false",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+        "notify.dispatcher.scheduler-enabled=false"
 })
-@EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
-class QueueSamplerIntegrationTest {
+class QueueSamplerIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     private JdbcTemplate jdbc;

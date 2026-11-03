@@ -2,10 +2,10 @@ package com.rc.notify.metrics;
 
 import com.rc.notify.dispatcher.Dispatcher;
 import com.rc.notify.ingest.ApiKeyAuthFilter;
+import com.rc.notify.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -39,11 +39,9 @@ import static org.assertj.core.api.Assertions.assertThat;
         // Spring Boot 的测试支持会把 management.defaults.metrics.export.enabled 置为 false
         // （避免测试向外部监控系统导出），于是 Prometheus registry 与 /actuator/prometheus 都不存在。
         // 这里显式打开具体 registry 的导出——测的就是这个端点。
-        "management.prometheus.metrics.export.enabled=true",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+        "management.prometheus.metrics.export.enabled=true"
 })
-@EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
-class MetricsIntegrationTest {
+class MetricsIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     private JdbcTemplate jdbc;

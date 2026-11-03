@@ -1,9 +1,9 @@
 package com.rc.notify.ingest;
 
 import com.rc.notify.metrics.QueueSampler;
+import com.rc.notify.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -25,12 +25,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 真实形态（到点了没人处理），而不是人为把阈值调成 0。用默认配置跑，阈值语义与线上一致。
  */
 @SpringBootTest(properties = {
-        "notify.dispatcher.scheduler-enabled=false",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+        "notify.dispatcher.scheduler-enabled=false"
 })
 @AutoConfigureMockMvc
-@EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
-class BackpressureIntegrationTest {
+class BackpressureIntegrationTest extends AbstractIntegrationTest {
 
     private static final String BODY = """
             {"idempotency_key":"order_paid:bp_1","target_url":"https://crm.example.com/cb","body":"{}"}

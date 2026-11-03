@@ -3,9 +3,9 @@ package com.rc.notify.query;
 import com.jayway.jsonpath.JsonPath;
 import com.rc.notify.ingest.ApiKeyAuthFilter;
 import com.rc.notify.store.PayloadCodec;
+import com.rc.notify.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -42,12 +42,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * （库里出现"不支持的密文版本: 123"，123 就是 `{`）。
  */
 @SpringBootTest(properties = {
-        "notify.dispatcher.scheduler-enabled=false",
-        "spring.datasource.url=jdbc:mysql://localhost:33061/notify?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+        "notify.dispatcher.scheduler-enabled=false"
 })
 @AutoConfigureMockMvc
-@EnabledIfEnvironmentVariable(named = "MYSQL_IT", matches = "true")
-class NotificationQueryIntegrationTest {
+class NotificationQueryIntegrationTest extends AbstractIntegrationTest {
 
     private static final String KEY_SHOP = "k_shop";          // -> caller: shop
     private static final String KEY_CRM = "k_crm";            // -> caller: crm

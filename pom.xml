@@ -65,6 +65,13 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- 集成测试的 MySQL 由容器提供（T4.1）：干净机器上 mvn verify 只需要 Docker，不需要本机装库。
+             版本由 spring-boot-dependencies 管理（1.19.8），不要在这里写死版本号。 -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>mysql</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
